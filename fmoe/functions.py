@@ -8,7 +8,7 @@ import torch
 from torch.autograd import Function
 import fmoe_cuda
 from .utils import get_torch_default_comm
-
+from copy import deepcopy
 
 def _ensure_nccl(t, comm=None):
     if comm is None:
@@ -84,6 +84,67 @@ def _local_gather(inp, pos, out_batch_size, maybe_overlap=True):
         inp_buf.index_copy_(0, pos, inp)
     return inp_buf
 
+class MOECache(Function):
+    r"""
+    Applies a caching according to a policy function
+    """
+
+    @staticmethod
+    def forward(
+        ctx, 
+        local_expert_count,
+        global_expert_count,
+        fwd_expert_count,
+        policy_fn,
+        experts,
+        batch_size, 
+        topk,
+        num_expert, 
+        world_size,
+        fused, # for optimization
+    ):
+        if world_size > 1:
+            sent_models = policy_fn(fwd_expert_count, global_expert_count, batch_size, topk)
+            
+            # sent_models is the information of which models to send and to where according to the previous selection. stored_models will contain the info of where to fetch models from
+            stored_models = fmoe_cuda.exchange_cache_info(sent_models.cuda(), num_expert, world_size).cpu()
+
+            local_params, all_params, models = MOECache._generate_model_parameters(sent_models, stored_models, experts, fused)
+            
+            print('Before params:', all_params)
+
+            fmoe_cuda.model_exchange(sent_models, stored_models, local_params, all_params, num_expert, world_size, fused)
+
+            print('After params:', all_params)
+            
+            return models, sent_models, stored_models
+        else:
+            # TODO what?
+            raise NotImplementedError
+
+    @staticmethod
+    def _generate_model_parameters(sent_models, stored_models, experts, fused):
+        r"""
+        TODO this function assumes all nodes have the same experts
+        """
+        if fused:
+            local_params = [list(experts.parameters())]
+
+            fetch_models = [
+                [deepcopy(experts)]
+                if i else []
+                for i in stored_models
+            ]
+
+        else:
+            raise NotImplementedError('No fused yet')
+
+        fetch_params = [[list(m.parameters()) for m in node] for node in fetch_models]
+        return local_params, fetch_params, fetch_models
+
+    @staticmethod
+    def backward(ctx):
+        pass
 
 class MOEScatter(Function):
     r"""

@@ -1,5 +1,7 @@
 #include "stream_manager.h"
 #ifdef FMOE_USE_NCCL
+#include <vector>
+#include <torch/extension.h>
 
 void fmoe_cuda_expert_exchange_impl(
         const long* local_expert_count, 
@@ -120,5 +122,86 @@ void fmoe_cuda_global_gather_impl(
     smgr->sync(1);
 }
 
+void fmoe_cuda_exchange_cache_info_impl(
+    const bool * sent_models,
+    bool * stored_models,
+    long num_expert,
+    long world_size,
+    CudaStreamManager * smgr) {
+    
+    NCCL_SAFE_CALL(ncclGroupStart());
+
+    for (int i = 0; i < world_size; i++) {
+        NCCL_SAFE_CALL(ncclSend(
+            sent_models + num_expert * i,
+            num_expert,
+            ncclChar,
+            i,
+            smgr->ncclcomm,
+            smgr->stream(0)));
+        
+        NCCL_SAFE_CALL(ncclRecv(
+            stored_models + num_expert * i,
+            num_expert,
+            ncclChar,
+            i,
+            smgr->ncclcomm,
+            smgr->stream(0)));
+    }
+
+    NCCL_SAFE_CALL(ncclGroupEnd());
+    smgr->sync(1);
+}
+
+template<typename scalar_t>
+void fmoe_cuda_model_exchange_impl(
+    bool * sent_models, 
+    bool * stored_models, 
+    std::vector<std::vector<torch::Tensor>> local_params, 
+    std::vector<std::vector<std::vector<torch::Tensor>>> params, 
+    long num_expert, 
+    long world_size, 
+    bool fused, 
+    CudaStreamManager * smgr) {
+    
+    for (size_t i = 0; i < num_expert; i++) {
+        for (size_t param_idx = 0; param_idx < local_params[i].size(); param_idx++) {
+            NCCL_SAFE_CALL(ncclGroupStart());
+            
+            // size in bytes
+            auto size = local_params[i][param_idx].numel() * sizeof(scalar_t);
+            
+            for (size_t j = 0; j < world_size; j++) {
+                size_t idx = i + j * num_expert;
+
+                if (sent_models[idx]) {
+                    scalar_t * param = local_params[i][param_idx].data_ptr<scalar_t>();
+                    NCCL_SAFE_CALL(ncclSend(
+                        param,
+                        size,
+                        ncclChar,
+                        j,
+                        smgr->ncclcomm,
+                        smgr->stream(0)));
+                }
+
+                if (stored_models[idx]) {
+                    scalar_t * param = params[j][i][param_idx].data_ptr<scalar_t>();
+                    NCCL_SAFE_CALL(ncclRecv(
+                        param,
+                        size,
+                        ncclChar,
+                        j,
+                        smgr->ncclcomm,
+                        smgr->stream(0)));
+                }
+            }
+            
+            NCCL_SAFE_CALL(ncclGroupEnd());
+        }
+    }
+
+    smgr->sync(1);
+}
 
 #endif  // FMOE_USE_NCCL

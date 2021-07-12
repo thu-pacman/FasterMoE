@@ -6,7 +6,7 @@ import torch.nn as nn
 import math
 
 from .functions import prepare_forward
-from .functions import MOEScatter, MOEGather, MOELinear
+from .functions import MOEScatter, MOEGather, MOELinear, MOECache
 from .functions import AllGather, Slice
 from .gates import NaiveGate
 
@@ -74,7 +74,7 @@ def mark_module_parallel_comm(module, comm):
         setattr(p, "dp_comm", comm)
 
 
-def _fmoe_general_global_forward(inp, gate, expert_fn, num_expert, world_size):
+def _fmoe_general_global_forward(inp, gate, expert_fn, policy_fn, experts, num_expert, world_size, fused):
     r"""
     A private function that performs the following steps to complete the MoE
     computation.
@@ -96,6 +96,17 @@ def _fmoe_general_global_forward(inp, gate, expert_fn, num_expert, world_size):
     topk = 1
     if len(gate.shape) == 2:
         topk = gate.shape[1]
+
+    models, sent_models, stored_models = MOECache.apply(
+        local_expert_count.reshape(world_size, num_expert), 
+        global_expert_count.reshape(world_size, num_expert), 
+        fwd_expert_count, policy_fn, experts,
+        inp.shape[0], topk, num_expert, world_size, fused)
+
+    print('Models', models)
+    print('Sent models', sent_models)
+    print('Stored models', stored_models)
+    
     x = MOEScatter.apply(
         inp, pos // topk,
         local_expert_count, global_expert_count, fwd_batch_size, world_size
@@ -113,6 +124,13 @@ def _fmoe_general_global_forward(inp, gate, expert_fn, num_expert, world_size):
     )
     return x
 
+def _default_policy(fwd_expert_count, global_expert_count, batch_size, topk):
+    r"""
+    TODO find a better policy
+
+    Must return a global_expert_count shaped tensor with the status of each (node, expert) as a bool tensor
+    """
+    return (fwd_expert_count > batch_size / 2) * global_expert_count.bool()
 
 class FMoE(nn.Module):
     r"""
@@ -142,6 +160,7 @@ class FMoE(nn.Module):
         gate=NaiveGate,
         expert=None,
         gate_hook=None,
+        policy_fn=_default_policy,
         mask=None,
         mask_dict=None,
     ):
@@ -171,6 +190,7 @@ class FMoE(nn.Module):
         self.gate_hook = gate_hook
         self.mask = mask
         self.mask_dict = mask_dict
+        self.policy_fn=policy_fn
 
     def expert_fn(self, inp, fwd_expert_count):
         r"""
@@ -224,7 +244,12 @@ class FMoE(nn.Module):
         fwd = _fmoe_general_global_forward(
             inp,
             gate_top_k_idx,
-            self.expert_fn, self.num_expert, self.world_size
+            self.expert_fn, 
+            self.policy_fn, 
+            self.experts, 
+            self.num_expert, 
+            self.world_size, 
+            self.experts_fused
         )
 
         # recover deleted tensors

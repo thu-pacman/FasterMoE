@@ -110,4 +110,56 @@ void _ensure_nccl(c10d::ProcessGroupNCCL& p, torch::Tensor t) {
     }
 }
 
+torch::Tensor _exchange_cache_info(
+        torch::Tensor sent_models,
+        long num_expert,
+        long world_size) {
+    
+    CHECK_INPUT(sent_models);
+
+    auto smgr = getCudaStreamManager(sent_models.device().index());
+
+    torch::Tensor stored_models = sent_models.new_empty({world_size, num_expert});
+
+    fmoe_cuda_exchange_cache_info_impl(sent_models.data_ptr<bool>(), stored_models.data_ptr<bool>(), num_expert, world_size, smgr);
+
+    return stored_models;
+}
+
+void _model_exchange(
+        torch::Tensor sent_models,
+        torch::Tensor stored_models,
+        std::vector<std::vector<torch::Tensor>> local_params,
+        std::vector<std::vector<std::vector<torch::Tensor>>> params,
+        long num_expert, long world_size, bool fused) {
+
+    for (int j = 0; j < num_expert; j++) {
+        for (auto t : local_params[j]) {
+            CHECK_INPUT(t);
+        }
+
+        for (int i = 0; i < world_size; i++){
+            if (params[i].size() <= 0) continue;
+            for (auto t : params[i][j]) {
+                CHECK_INPUT(t);
+            }
+        }
+    }
+
+    auto smgr = getCudaStreamManager(local_params[0][0].device().index());
+
+    AT_DISPATCH_FLOATING_TYPES_AND_HALF(local_params[0][0].scalar_type(), 
+            "fmoe_cuda_model_exchange", ([&] {
+        fmoe_cuda_model_exchange_impl<scalar_t>(
+            sent_models.data_ptr<bool>(),
+            stored_models.data_ptr<bool>(),
+            local_params,
+            params,
+            num_expert, world_size, fused, // TODO should fused be here
+            smgr
+        );
+    }));
+
+}
+
 #endif  // FMOE_USE_NCCL
