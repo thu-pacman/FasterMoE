@@ -113,7 +113,10 @@ class MOECache(Function):
             
             print('Before params:', all_params)
 
-            fmoe_cuda.model_exchange(sent_models, stored_models, local_params, all_params, num_expert, world_size, fused)
+            if not fused:
+                fmoe_cuda.model_exchange(sent_models, stored_models, local_params, all_params, num_expert, world_size, fused)
+            else:
+                fmoe_cuda.model_exchange(sent_models.any(dim=1), stored_models.any(dim=1), local_params, all_params, 1, world_size, fused)
 
             print('After params:', all_params)
             
@@ -132,7 +135,7 @@ class MOECache(Function):
 
             fetch_models = [
                 [deepcopy(experts)]
-                if i else []
+                if i.any() else []
                 for i in stored_models
             ]
 

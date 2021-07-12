@@ -176,6 +176,7 @@ void fmoe_cuda_model_exchange_impl(
 
                 if (sent_models[idx]) {
                     scalar_t * param = local_params[i][param_idx].data_ptr<scalar_t>();
+                    // printf("Send %ld %ld %ld\n", i,j,param_idx);
                     NCCL_SAFE_CALL(ncclSend(
                         param,
                         size,
@@ -187,6 +188,7 @@ void fmoe_cuda_model_exchange_impl(
 
                 if (stored_models[idx]) {
                     scalar_t * param = params[j][i][param_idx].data_ptr<scalar_t>();
+                    // printf("Recv %ld %ld %ld\n", i,j,param_idx);
                     NCCL_SAFE_CALL(ncclRecv(
                         param,
                         size,
