@@ -104,21 +104,28 @@ class MOECache(Function):
         fused, # for optimization
     ):
         if world_size > 1:
-            sent_models = policy_fn(fwd_expert_count, global_expert_count, batch_size, topk)
+            selection = policy_fn(fwd_expert_count, global_expert_count, batch_size, topk)
             
             # sent_models is the information of which models to send and to where according to the previous selection. stored_models will contain the info of where to fetch models from
-            stored_models = fmoe_cuda.exchange_cache_info(sent_models.cuda(), num_expert, world_size).cpu()
+            sent_models, stored_models = [x.cpu() for x in fmoe_cuda.exchange_cache_info(selection.cuda(), num_expert, world_size)]
 
             local_params, all_params, models = MOECache._generate_model_parameters(sent_models, stored_models, experts, fused)
             
-            print('Before params:', all_params)
+            # print('Before params:', all_params)
 
             if not fused:
                 fmoe_cuda.model_exchange(sent_models, stored_models, local_params, all_params, num_expert, world_size, fused)
             else:
-                fmoe_cuda.model_exchange(sent_models.any(dim=1), stored_models.any(dim=1), local_params, all_params, 1, world_size, fused)
+                sent_models = sent_models.any(dim=1)
+                stored_models =  stored_models.any(dim=1)
+                
+                fmoe_cuda.model_exchange(sent_models, stored_models, local_params, all_params, 1, world_size, fused)
 
-            print('After params:', all_params)
+                # Because we are fusing, all other experts will be sent together
+                sent_models = sent_models.view(world_size, 1).repeat(1, num_expert)
+                stored_models = stored_models.view(world_size, 1).repeat(1, num_expert)
+                
+            # print('After params:', all_params)
             
             return models, sent_models, stored_models
         else:
@@ -163,28 +170,39 @@ class MOEScatter(Function):
         pos,
         local_expert_count,
         global_expert_count,
+        sent_models,
+        stored_models,
         fwd_batch_size,
         world_size,
     ):
         local_input_buf = _local_scatter(inp, pos)
         if world_size > 1:
+            # FIXME remove fwd_batch_size since we won't use it
+            staying = int((local_expert_count.view(world_size, -1) * stored_models).sum().item())
+            not_arriving = int((global_expert_count.view(world_size, -1) * sent_models).sum().item())
+            print(f'Updating fwd_batch size from {fwd_batch_size}, staying {staying}, not_arriving {not_arriving}')
+            fwd_batch_size += staying - not_arriving
+            print(local_input_buf)
             global_input_buf = fmoe_cuda.global_scatter(
                 local_input_buf,
                 local_expert_count,
                 global_expert_count,
+                sent_models,
+                stored_models,
                 fwd_batch_size,
                 world_size,
             )
+            print(global_input_buf)
         else:
             global_input_buf = local_input_buf
         ctx.moe_args = inp.shape[0], pos.shape[0], world_size
-        variables = (pos, local_expert_count, global_expert_count)
+        variables = (pos, local_expert_count, global_expert_count, sent_models, stored_models)
         ctx.save_for_backward(*variables)
         return global_input_buf
 
     @staticmethod
     def backward(ctx, global_grad_in):
-        (pos, local_expert_count, global_expert_count) = ctx.saved_tensors
+        (pos, local_expert_count, global_expert_count, sent_models, stored_models) = ctx.saved_tensors
         (inp_batch_size, buf_batch_size, world_size) = ctx.moe_args
 
         if world_size > 1:
@@ -192,13 +210,15 @@ class MOEScatter(Function):
                 global_grad_in,
                 local_expert_count,
                 global_expert_count,
+                sent_models,
+                stored_models,
                 buf_batch_size,
                 world_size,
             )
         else:
             local_grad_in = global_grad_in
         grad_in = _local_gather(local_grad_in, pos, inp_batch_size)
-        return grad_in, None, None, None, None, None
+        return grad_in, None, None, None, None, None, None, None
 
 
 class MOELinear(Function):
@@ -241,30 +261,36 @@ class MOEGather(Function):
         pos,
         local_expert_count,
         global_expert_count,
+        sent_models,
+        stored_models,
         local_batch_size,
         world_size,
     ):
         if world_size > 1:
+            print(global_output_buf)
             local_output_buf = fmoe_cuda.global_gather(
                 global_output_buf,
                 local_expert_count,
                 global_expert_count,
+                sent_models,
+                stored_models,
                 pos.shape[0],
                 world_size,
             )
+            print(local_output_buf)
         else:
             local_output_buf = global_output_buf
         output = _local_gather(local_output_buf, pos, local_batch_size,
                 maybe_overlap=False)
 
         ctx.moe_args = (global_output_buf.shape[0], world_size)
-        variables = (pos, local_expert_count, global_expert_count)
+        variables = (pos, local_expert_count, global_expert_count, sent_models, stored_models)
         ctx.save_for_backward(*variables)
         return output
 
     @staticmethod
     def backward(ctx, grad_out):
-        pos, local_expert_count, global_expert_count = ctx.saved_tensors
+        pos, local_expert_count, global_expert_count, sent_models, stored_models = ctx.saved_tensors
         fwd_batch_size, world_size = ctx.moe_args
         grad_out_buf = _local_scatter(grad_out.contiguous(), pos)
         if world_size > 1:
@@ -272,12 +298,14 @@ class MOEGather(Function):
                 grad_out_buf,
                 local_expert_count,
                 global_expert_count,
+                sent_models,
+                stored_models,
                 fwd_batch_size,
                 world_size,
             )
         else:
             global_grad_out_buf = grad_out_buf
-        return global_grad_out_buf, None, None, None, None, None
+        return global_grad_out_buf, None, None, None, None, None, None, None
 
 
 class AllGather(Function):

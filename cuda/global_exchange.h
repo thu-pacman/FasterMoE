@@ -35,6 +35,8 @@ void fmoe_cuda_global_scatter_impl(
     const long* local_expert_count,
     const long* global_expert_count,
     scalar_t* input_buf,
+    const bool * sent_models,
+    const bool * stored_models,
     size_t in_feat, size_t n_expert, size_t world_size,
     CudaStreamManager* smgr) {
     // assert world_size > 1
@@ -51,15 +53,26 @@ void fmoe_cuda_global_scatter_impl(
         for (size_t j = 0; j < world_size; ++j) {
             int idx = i + j * n_expert;
             if (local_expert_count[idx]) {
-                NCCL_SAFE_CALL(ncclSend(
+                // model fetched from other node
+                if (stored_models[idx]) {
+                    checkCudaErrors(cudaMemcpyAsync(
+                        input_buf + recv_ptr * in_feat,
+                        local_input_buf + expert_ptr[idx] * in_feat,
+                        local_expert_count[idx] * in_feat * sizeof(scalar_t),
+                        cudaMemcpyDeviceToDevice,
+                        smgr->stream(1)));
+                    recv_ptr += local_expert_count[idx];
+                } else {
+                    NCCL_SAFE_CALL(ncclSend(
                         local_input_buf + expert_ptr[idx] * in_feat, 
                         local_expert_count[idx] * in_feat * sizeof(scalar_t),
                         ncclChar, 
                         j,
                         smgr->ncclcomm,
                         smgr->stream(0)));
+                }
             }
-            if (global_expert_count[idx]) {
+            if (global_expert_count[idx] && !sent_models[idx]) {
                 NCCL_SAFE_CALL(ncclRecv(
                         input_buf + recv_ptr * in_feat,
                         global_expert_count[idx] * in_feat * sizeof(scalar_t),
@@ -73,7 +86,7 @@ void fmoe_cuda_global_scatter_impl(
         NCCL_SAFE_CALL(ncclGroupEnd());
     }
     delete [] expert_ptr;
-    smgr->sync(1);
+    smgr->sync(2);
 }
 
 template<typename scalar_t>
@@ -82,6 +95,8 @@ void fmoe_cuda_global_gather_impl(
     const long* local_expert_count,
     const long* global_expert_count,
     scalar_t* local_output_buf,
+    const bool * sent_models,
+    const bool * stored_models,
     size_t out_feat, size_t n_expert, size_t world_size,
     CudaStreamManager* smgr) {
     long send_ptr = 0;
@@ -97,16 +112,27 @@ void fmoe_cuda_global_gather_impl(
         for (size_t j = 0; j < world_size; ++j) {
             int idx = i + j * n_expert;
             if (global_expert_count[idx]) {
-                NCCL_SAFE_CALL(ncclSend(
+                if (sent_models[idx]) {
+                    checkCudaErrors(cudaMemcpyAsync(
+                        local_output_buf + expert_ptr[idx] * out_feat,
+                        output_buf + send_ptr * out_feat,
+                        global_expert_count[idx] * out_feat * sizeof(scalar_t),
+                        cudaMemcpyDeviceToDevice,
+                        smgr->stream(1)));
+                    send_ptr += local_expert_count[idx];
+
+                } else {
+                    NCCL_SAFE_CALL(ncclSend(
                         output_buf + send_ptr * out_feat,
                         global_expert_count[idx] * out_feat * sizeof(scalar_t),
                         ncclChar,
                         j,
                         smgr->ncclcomm,
                         smgr->stream(0)));
-                send_ptr += global_expert_count[idx];
+                    send_ptr += global_expert_count[idx];
+                }
             }
-            if (local_expert_count[idx]) {
+            if (local_expert_count[idx] && !stored_models[idx]) {
                 NCCL_SAFE_CALL(ncclRecv(
                         local_output_buf + expert_ptr[idx] * out_feat, 
                         local_expert_count[idx] * out_feat * sizeof(scalar_t),
@@ -119,19 +145,31 @@ void fmoe_cuda_global_gather_impl(
         NCCL_SAFE_CALL(ncclGroupEnd());
     }
     delete [] expert_ptr;
-    smgr->sync(1);
+    smgr->sync(2);
 }
 
 void fmoe_cuda_exchange_cache_info_impl(
-    const bool * sent_models,
+    bool * sent_models,
     bool * stored_models,
     long num_expert,
     long world_size,
     CudaStreamManager * smgr) {
     
+    int rank;
+    NCCL_SAFE_CALL(ncclCommUserRank(smgr->ncclcomm, &rank));
+
     NCCL_SAFE_CALL(ncclGroupStart());
 
     for (int i = 0; i < world_size; i++) {
+        if (i == rank) {
+            checkCudaErrors(cudaMemsetAsync(
+                sent_models + num_expert * i,
+                0,
+                num_expert,
+                smgr->stream(1)));
+            continue;
+        }
+        
         NCCL_SAFE_CALL(ncclSend(
             sent_models + num_expert * i,
             num_expert,
@@ -150,7 +188,7 @@ void fmoe_cuda_exchange_cache_info_impl(
     }
 
     NCCL_SAFE_CALL(ncclGroupEnd());
-    smgr->sync(1);
+    smgr->sync(2);
 }
 
 template<typename scalar_t>
@@ -164,6 +202,10 @@ void fmoe_cuda_model_exchange_impl(
     bool fused, 
     CudaStreamManager * smgr) {
     
+    int rank;
+    NCCL_SAFE_CALL(ncclCommUserRank(smgr->ncclcomm, &rank));
+
+
     for (size_t i = 0; i < num_expert; i++) {
         for (size_t param_idx = 0; param_idx < local_params[i].size(); param_idx++) {
             NCCL_SAFE_CALL(ncclGroupStart());
@@ -172,6 +214,8 @@ void fmoe_cuda_model_exchange_impl(
             auto size = local_params[i][param_idx].numel() * sizeof(scalar_t);
             
             for (size_t j = 0; j < world_size; j++) {
+                if (j == rank) continue;
+
                 size_t idx = i + j * num_expert;
 
                 if (sent_models[idx]) {

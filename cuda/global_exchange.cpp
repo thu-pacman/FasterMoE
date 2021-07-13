@@ -23,6 +23,8 @@ torch::Tensor _global_scatter(
         torch::Tensor input_buf,
         torch::Tensor local_expert_count,
         torch::Tensor global_expert_count,
+        torch::Tensor sent_models, 
+        torch::Tensor stored_models,
         long batch_size, long n_workers) {
     CHECK_INPUT(input_buf);
 
@@ -38,6 +40,8 @@ torch::Tensor _global_scatter(
             local_expert_count.data_ptr<long>(),
             global_expert_count.data_ptr<long>(),
             global_input_buf.data_ptr<scalar_t>(),
+            sent_models.data_ptr<bool>(),
+            stored_models.data_ptr<bool>(),
             in_feat, n_expert, n_workers,
             smgr
         );
@@ -49,6 +53,8 @@ torch::Tensor _global_gather(
         torch::Tensor output_buf,
         torch::Tensor local_expert_count,
         torch::Tensor global_expert_count,
+        torch::Tensor sent_models, 
+        torch::Tensor stored_models,
         long batch_size, long n_workers) {
     CHECK_INPUT(output_buf);
 
@@ -64,6 +70,8 @@ torch::Tensor _global_gather(
             local_expert_count.data_ptr<long>(),
             global_expert_count.data_ptr<long>(),
             local_output_buf.data_ptr<scalar_t>(),
+            sent_models.data_ptr<bool>(),
+            stored_models.data_ptr<bool>(),
             out_feat, n_expert, n_workers,
             smgr
         );
@@ -110,7 +118,7 @@ void _ensure_nccl(c10d::ProcessGroupNCCL& p, torch::Tensor t) {
     }
 }
 
-torch::Tensor _exchange_cache_info(
+std::vector<torch::Tensor> _exchange_cache_info(
         torch::Tensor sent_models,
         long num_expert,
         long world_size) {
@@ -119,11 +127,11 @@ torch::Tensor _exchange_cache_info(
 
     auto smgr = getCudaStreamManager(sent_models.device().index());
 
-    torch::Tensor stored_models = sent_models.new_empty({world_size, num_expert});
+    torch::Tensor stored_models = sent_models.new_zeros({world_size, num_expert});
 
     fmoe_cuda_exchange_cache_info_impl(sent_models.data_ptr<bool>(), stored_models.data_ptr<bool>(), num_expert, world_size, smgr);
 
-    return stored_models;
+    return {sent_models, stored_models};
 }
 
 void _model_exchange(

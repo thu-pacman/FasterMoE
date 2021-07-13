@@ -12,13 +12,17 @@ torch::Tensor _global_scatter(
         torch::Tensor input_buf,
         torch::Tensor local_expert_count,
         torch::Tensor global_expert_count,
+        torch::Tensor sent_models, 
+        torch::Tensor stored_models,
         long batch_size, long n_workers);
 torch::Tensor _global_gather(
         torch::Tensor output_buf,
         torch::Tensor local_expert_count,
         torch::Tensor global_expert_count,
+        torch::Tensor sent_models, 
+        torch::Tensor stored_models,
         long batch_size, long n_workers);
-torch::Tensor _exchange_cache_info(
+std::vector<torch::Tensor> _exchange_cache_info(
         torch::Tensor sent_models,
         long num_expert,
         long world_size);
