@@ -32,6 +32,12 @@ void _model_exchange(
         std::vector<std::vector<torch::Tensor>> local_params,
         std::vector<std::vector<std::vector<torch::Tensor>>> params,
         long num_expert, long world_size, bool fused);
+torch::Tensor _generate_cached_count(
+        torch::Tensor local_expert_count,
+        torch::Tensor global_expert_count,
+        torch::Tensor sent_models,
+        torch::Tensor stored_models,
+        long num_expert, long world_size);
 void _ensure_nccl(c10d::ProcessGroupNCCL& p, torch::Tensor t);
 #endif  // FMOE_USE_NCCL
 
@@ -75,6 +81,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("ensure_nccl", &_ensure_nccl, "FastMoE ensure torch nccl comm");
     m.def("exchange_cache_info", &_exchange_cache_info, "FastMoE exchange cache info (CUDA)");
     m.def("model_exchange", &_model_exchange, "FastMoE model exchange (CUDA)");
+    m.def("generate_cached_count", &_generate_cached_count, "FastMoE generate cached count (CUDA)");
 #endif
 
     m.def("expert_count", &_expert_count, "FastMoE count gate indices (CUDA)");

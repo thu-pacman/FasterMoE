@@ -170,4 +170,29 @@ void _model_exchange(
 
 }
 
+torch::Tensor _generate_cached_count(
+        torch::Tensor local_expert_count,
+        torch::Tensor global_expert_count,
+        torch::Tensor sent_models,
+        torch::Tensor stored_models,
+        long num_expert, long world_size) {
+    
+    CHECK_INPUT(local_expert_count);
+    CHECK_INPUT(global_expert_count);
+    CHECK_INPUT(sent_models);
+    CHECK_INPUT(stored_models);
+
+    auto smgr = getCudaStreamManager(local_expert_count.device().index());
+    int rank;
+    NCCL_SAFE_CALL(ncclCommUserRank(smgr->ncclcomm, &rank));
+
+    torch::Tensor new_fwd_expert_count = local_expert_count.mul(stored_models);             // values for fetched models
+    torch::Tensor self_counts = global_expert_count.mul(sent_models.logical_not()).sum(0);  // values that will still be received in the local models
+
+    // Join the information
+    new_fwd_expert_count[rank] = new_fwd_expert_count[rank].add(self_counts);
+    
+    return new_fwd_expert_count.view({num_expert * world_size});
+}
+
 #endif  // FMOE_USE_NCCL

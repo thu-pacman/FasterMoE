@@ -97,7 +97,7 @@ def _fmoe_general_global_forward(inp, gate, expert_fn, policy_fn, experts, num_e
     if len(gate.shape) == 2:
         topk = gate.shape[1]
 
-    models, sent_models, stored_models = MOECache.apply(
+    models, sent_models, stored_models, fwd_expert_count = MOECache.apply(
         local_expert_count.view(world_size, num_expert), 
         global_expert_count.view(world_size, num_expert), 
         fwd_expert_count, policy_fn, experts,

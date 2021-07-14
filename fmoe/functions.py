@@ -127,9 +127,18 @@ class MOECache(Function):
                 
             # print('After params:', all_params)
             
-            return models, sent_models, stored_models
+            # now we need to include information about all the local experts that will run
+            # num_expert * world_size tensor
+            print('local_expert_count', local_expert_count)
+            print('global_expert_count', global_expert_count)
+            print('sent_models', sent_models)
+            print('stored_models', stored_models)
+            print('Before count:',fwd_expert_count)
+            fwd_expert_count = fmoe_cuda.generate_cached_count(local_expert_count.cuda(), global_expert_count.cuda(), sent_models.cuda(), stored_models.cuda(), num_expert, world_size).cpu()
+            print('After count:',fwd_expert_count)
+            return models, sent_models, stored_models, fwd_expert_count
         else:
-            # TODO what?
+            # TODO what?]
             raise NotImplementedError
 
     @staticmethod
