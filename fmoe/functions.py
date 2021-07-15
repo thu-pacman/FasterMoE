@@ -60,13 +60,11 @@ def prepare_forward(gate, num_expert, world_size, comm=None):
     with torch.no_grad():
         fwd_expert_count = global_expert_count.view(world_size,
                 num_expert).sum(dim=0)
-        fwd_batch_size = int(fwd_expert_count.sum().item())
     return (
         pos,
         local_expert_count.cpu(),
         global_expert_count.cpu(),
-        fwd_expert_count.cpu(),
-        fwd_batch_size,
+        fwd_expert_count.cpu()
     )
 
 
@@ -83,6 +81,26 @@ def _local_gather(inp, pos, out_batch_size, maybe_overlap=True):
     else:
         inp_buf.index_copy_(0, pos, inp)
     return inp_buf
+
+def _generate_model_parameters(sent_models, stored_models, experts, fused):
+    r"""
+    TODO this function assumes all nodes have the same experts
+    """
+    if fused:
+        local_params = [list(experts.parameters())]
+
+        fetch_models = [
+            [deepcopy(experts)]
+            if i.any() else []
+            for i in stored_models
+        ]
+
+    else:
+        raise NotImplementedError('No fused yet')
+
+    fetch_params = [[list(m.parameters()) for m in node] for node in fetch_models]
+    return local_params, fetch_params, fetch_models
+
 
 class MOECache(Function):
     r"""
@@ -109,10 +127,8 @@ class MOECache(Function):
             # sent_models is the information of which models to send and to where according to the previous selection. stored_models will contain the info of where to fetch models from
             sent_models, stored_models = [x.cpu() for x in fmoe_cuda.exchange_cache_info(selection.cuda(), num_expert, world_size)]
 
-            local_params, all_params, models = MOECache._generate_model_parameters(sent_models, stored_models, experts, fused)
+            local_params, all_params, models = _generate_model_parameters(sent_models, stored_models, experts, fused)
             
-            # print('Before params:', all_params)
-
             if not fused:
                 fmoe_cuda.model_exchange(sent_models, stored_models, local_params, all_params, num_expert, world_size, fused)
             else:
@@ -123,43 +139,17 @@ class MOECache(Function):
 
                 # Because we are fusing, all other experts will be sent together
                 sent_models = sent_models.view(world_size, 1).repeat(1, num_expert)
-                stored_models = stored_models.view(world_size, 1).repeat(1, num_expert)
-                
-            # print('After params:', all_params)
+                stored_models = stored_models.view(world_size, 1).repeat(1, num_expert)    
             
             # now we need to include information about all the local experts that will run
             # num_expert * world_size tensor
-            print('local_expert_count', local_expert_count)
-            print('global_expert_count', global_expert_count)
-            print('sent_models', sent_models)
-            print('stored_models', stored_models)
-            print('Before count:',fwd_expert_count)
             fwd_expert_count = fmoe_cuda.generate_cached_count(local_expert_count.cuda(), global_expert_count.cuda(), sent_models.cuda(), stored_models.cuda(), num_expert, world_size).cpu()
-            print('After count:',fwd_expert_count)
-            return models, sent_models, stored_models, fwd_expert_count
+            print('fwd_expert_count', fwd_expert_count)
+            
         else:
-            # TODO what?]
             raise NotImplementedError
 
-    @staticmethod
-    def _generate_model_parameters(sent_models, stored_models, experts, fused):
-        r"""
-        TODO this function assumes all nodes have the same experts
-        """
-        if fused:
-            local_params = [list(experts.parameters())]
-
-            fetch_models = [
-                [deepcopy(experts)]
-                if i.any() else []
-                for i in stored_models
-            ]
-
-        else:
-            raise NotImplementedError('No fused yet')
-
-        fetch_params = [[list(m.parameters()) for m in node] for node in fetch_models]
-        return local_params, fetch_params, fetch_models
+        return models, sent_models, stored_models, fwd_expert_count, int(fwd_expert_count.sum().item())
 
     @staticmethod
     def backward(ctx):
@@ -186,12 +176,7 @@ class MOEScatter(Function):
     ):
         local_input_buf = _local_scatter(inp, pos)
         if world_size > 1:
-            # FIXME remove fwd_batch_size since we won't use it
-            staying = int((local_expert_count.view(world_size, -1) * stored_models).sum().item())
-            not_arriving = int((global_expert_count.view(world_size, -1) * sent_models).sum().item())
-            print(f'Updating fwd_batch size from {fwd_batch_size}, staying {staying}, not_arriving {not_arriving}')
-            fwd_batch_size += staying - not_arriving
-            print(local_input_buf)
+            print('Allocating size: ', fwd_batch_size)
             global_input_buf = fmoe_cuda.global_scatter(
                 local_input_buf,
                 local_expert_count,

@@ -91,23 +91,16 @@ def _fmoe_general_global_forward(inp, gate, expert_fn, policy_fn, experts, num_e
         local_expert_count,
         global_expert_count,
         fwd_expert_count,
-        fwd_batch_size,
     ) = prepare_forward(gate, num_expert, world_size)
     topk = 1
     if len(gate.shape) == 2:
         topk = gate.shape[1]
 
-    models, sent_models, stored_models, fwd_expert_count = MOECache.apply(
+    models, sent_models, stored_models, fwd_expert_count, fwd_batch_size = MOECache.apply(
         local_expert_count.view(world_size, num_expert), 
         global_expert_count.view(world_size, num_expert), 
         fwd_expert_count, policy_fn, experts,
         inp.shape[0], topk, num_expert, world_size, fused)
-
-    print('Models', models)
-    print('Sent models', sent_models)
-    print('Stored models', stored_models)
-    print('local_expert_count', local_expert_count)
-    print('global_expert_count', global_expert_count)
     
     x = MOEScatter.apply(
         inp, pos // topk,
@@ -120,7 +113,6 @@ def _fmoe_general_global_forward(inp, gate, expert_fn, policy_fn, experts, num_e
     out_batch_size = inp.shape[0]
     if len(gate.shape) == 2:
         out_batch_size *= gate.shape[1]
-    print('---------------------')
 
     x = MOEGather.apply(
         x, pos,
