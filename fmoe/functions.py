@@ -135,7 +135,11 @@ class MOECache(Function):
                 sent_models = sent_models.any(dim=1)
                 stored_models =  stored_models.any(dim=1)
                 
-                fmoe_cuda.model_exchange(sent_models, stored_models, local_params, all_params, 1, world_size, fused)
+                # TODO should we extract this value?
+                i = fmoe_cuda.model_exchange(sent_models, stored_models, local_params, all_params, 1, world_size, fused)
+                
+                # add self node's experts to the list without copying
+                models[i] = [experts]
 
                 # Because we are fusing, all other experts will be sent together
                 sent_models = sent_models.view(world_size, 1).repeat(1, num_expert)
@@ -144,7 +148,6 @@ class MOECache(Function):
             # now we need to include information about all the local experts that will run
             # num_expert * world_size tensor
             fwd_expert_count = fmoe_cuda.generate_cached_count(local_expert_count.cuda(), global_expert_count.cuda(), sent_models.cuda(), stored_models.cuda(), num_expert, world_size).cpu()
-            print('fwd_expert_count', fwd_expert_count)
             
         else:
             raise NotImplementedError
@@ -186,7 +189,6 @@ class MOEScatter(Function):
                 fwd_batch_size,
                 world_size,
             )
-            print(global_input_buf)
         else:
             global_input_buf = local_input_buf
         ctx.moe_args = inp.shape[0], pos.shape[0], world_size
@@ -261,7 +263,6 @@ class MOEGather(Function):
         world_size,
     ):
         if world_size > 1:
-            print(global_output_buf)
             local_output_buf = fmoe_cuda.global_gather(
                 global_output_buf,
                 local_expert_count,
@@ -271,7 +272,6 @@ class MOEGather(Function):
                 pos.shape[0],
                 world_size,
             )
-            print(local_output_buf)
         else:
             local_output_buf = global_output_buf
         output = _local_gather(local_output_buf, pos, local_batch_size,

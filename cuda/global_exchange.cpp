@@ -134,7 +134,7 @@ std::vector<torch::Tensor> _exchange_cache_info(
     return {sent_models, stored_models};
 }
 
-void _model_exchange(
+int _model_exchange(
         torch::Tensor sent_models,
         torch::Tensor stored_models,
         std::vector<std::vector<torch::Tensor>> local_params,
@@ -168,6 +168,10 @@ void _model_exchange(
         );
     }));
 
+    int rank;
+    NCCL_SAFE_CALL(ncclCommUserRank(smgr->ncclcomm, &rank));
+
+    return rank; // TODO should we do this?
 }
 
 torch::Tensor _generate_cached_count(

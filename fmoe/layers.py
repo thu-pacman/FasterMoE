@@ -108,7 +108,7 @@ def _fmoe_general_global_forward(inp, gate, expert_fn, policy_fn, experts, num_e
         sent_models, stored_models,
         fwd_batch_size, world_size
     )
-    x = expert_fn(x, fwd_expert_count)
+    x = expert_fn(x, models, fwd_expert_count, num_expert)
 
     out_batch_size = inp.shape[0]
     if len(gate.shape) == 2:
@@ -190,21 +190,40 @@ class FMoE(nn.Module):
         self.mask_dict = mask_dict
         self.policy_fn=policy_fn
 
-    def expert_fn(self, inp, fwd_expert_count):
+    def expert_fn(self, inp, models, fwd_expert_count, num_expert):
         r"""
         The default expert function which either calls the experts as a whole
         or as separate experts.
         """
-        if self.experts_fused:
-            return self.experts(inp, fwd_expert_count)
-        outputs = []
-        base_idx = 0
-        for i in range(self.num_expert):
-            batch_size = fwd_expert_count[i].item()
-            inp_slice = inp[base_idx : base_idx + batch_size]
-            outputs.append(self.experts[i](inp_slice))
-            base_idx += batch_size
-        return torch.cat(outputs, dim=0)
+        res = []
+        
+        input_ptr = 0        
+        for j, counts in enumerate(fwd_expert_count.view(-1, num_expert)):
+            size = counts.sum().item()
+            node_inp = inp[input_ptr:input_ptr + size]
+            input_ptr += size
+            
+            experts = models[j] # node j's experts
+
+            if not experts:
+                if counts.any():
+                    raise ValueError(f'Experts is {experts} yet counts is {counts}')
+                continue
+                
+            if self.experts_fused:
+                res.append(experts[0](node_inp, counts))
+                continue
+            
+            outputs = []
+            base_idx = 0
+            for i in range(self.num_expert):
+                batch_size = counts[i].item()
+                inp_slice = node_inp[base_idx : base_idx + batch_size]
+                outputs.append(experts[i](inp_slice))
+                base_idx += batch_size
+            res.append(torch.cat(outputs, dim=0))
+        
+        return torch.cat(res, dim=0)
 
     def mark_parallel_comm(self, expert_dp_comm="none"):
         r"""
