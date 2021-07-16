@@ -109,7 +109,8 @@ class MOECache(Function):
 
     @staticmethod
     def forward(
-        ctx, 
+        ctx,
+        inp,
         local_expert_count,
         global_expert_count,
         fwd_expert_count,
@@ -136,7 +137,7 @@ class MOECache(Function):
                 stored_models =  stored_models.any(dim=1)
                 
                 # TODO should we extract this value?
-                i = fmoe_cuda.model_exchange(sent_models, stored_models, local_params, all_params, 1, world_size, fused)
+                i = fmoe_cuda.model_exchange(sent_models, stored_models, local_params, all_params, 1, world_size)
                 
                 # add self node's experts to the list without copying
                 models[i] = [experts]
@@ -152,11 +153,32 @@ class MOECache(Function):
         else:
             raise NotImplementedError
 
-        return models, sent_models, stored_models, fwd_expert_count, int(fwd_expert_count.sum().item())
+        variables = (sent_models, stored_models)
+        ctx.save_for_backward(*variables)
+        ctx.models = models, i
+        return inp, models, sent_models, stored_models, fwd_expert_count, int(fwd_expert_count.sum().item())
 
     @staticmethod
-    def backward(ctx):
-        pass
+    def backward(ctx, inp, models, sent_models, stored_models, fwd_expert_count, fwd_batch_size):
+        sent_models, stored_models = ctx.saved_tensors
+        models, i = ctx.models
+        local_experts = models[i]
+        models[i] = [] # remove self from list
+
+        gradients = [[[x.grad for x in m.parameters()] for m in node] for node in models]
+        local_gradients = [[x.grad for x in m.parameters()] for m in local_experts]
+
+        world_size = sent_models.shape[0]
+        num_expert = len(local_experts)
+
+        if num_expert != sent_models.shape[1]:
+            # fused
+            sent_models = sent_models.any(dim=1)
+            stored_models = stored_models.any(dim=1)
+        
+        fmoe_cuda.gradient_exchange(sent_models, stored_models, local_gradients, gradients, num_expert, world_size)
+        
+        return inp, None, None, None, None, None, None, None, None, None, None, None
 
 class MOEScatter(Function):
     r"""
@@ -179,7 +201,6 @@ class MOEScatter(Function):
     ):
         local_input_buf = _local_scatter(inp, pos)
         if world_size > 1:
-            print('Allocating size: ', fwd_batch_size)
             global_input_buf = fmoe_cuda.global_scatter(
                 local_input_buf,
                 local_expert_count,

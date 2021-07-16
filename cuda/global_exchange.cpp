@@ -139,7 +139,7 @@ int _model_exchange(
         torch::Tensor stored_models,
         std::vector<std::vector<torch::Tensor>> local_params,
         std::vector<std::vector<std::vector<torch::Tensor>>> params,
-        long num_expert, long world_size, bool fused) {
+        long num_expert, long world_size) {
 
     for (int j = 0; j < num_expert; j++) {
         for (auto t : local_params[j]) {
@@ -163,7 +163,7 @@ int _model_exchange(
             stored_models.data_ptr<bool>(),
             local_params,
             params,
-            num_expert, world_size, fused, // TODO should fused be here
+            num_expert, world_size, // TODO should fused be here
             smgr
         );
     }));
@@ -197,6 +197,43 @@ torch::Tensor _generate_cached_count(
     new_fwd_expert_count[rank] = new_fwd_expert_count[rank].add(self_counts);
     
     return new_fwd_expert_count.view({num_expert * world_size});
+}
+
+void _gradient_exchange(
+        torch::Tensor sent_models,
+        torch::Tensor stored_models,
+        std::vector<std::vector<torch::Tensor>> local_grads,
+        std::vector<std::vector<std::vector<torch::Tensor>>> grads,
+        long num_expert, long world_size) {
+
+    for (int j = 0; j < num_expert; j++) {
+        for (auto t : local_grads[j]) {
+            CHECK_INPUT(t);
+        }
+
+        for (int i = 0; i < world_size; i++){
+            if (grads[i].size() <= 0) continue;
+            for (auto t : grads[i][j]) {
+                CHECK_INPUT(t);
+            }
+        }
+    }
+
+    auto smgr = getCudaStreamManager(local_grads[0][0].device().index());
+    auto expert_counts = sent_models.sum(0); // number of nodes to get the grads back from
+
+    AT_DISPATCH_FLOATING_TYPES_AND_HALF(local_grads[0][0].scalar_type(), 
+            "fmoe_cuda_gradient_exchange", ([&] {
+        fmoe_cuda_gradient_exchange_impl<scalar_t>(
+            sent_models.data_ptr<bool>(),
+            stored_models.data_ptr<bool>(),
+            expert_counts.data_ptr<long int>(),
+            local_grads,
+            grads,
+            num_expert, world_size, // TODO should fused be here
+            smgr
+        );
+    }));
 }
 
 #endif  // FMOE_USE_NCCL
