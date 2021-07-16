@@ -111,35 +111,34 @@ void fmoe_cuda_global_gather_impl(
         NCCL_SAFE_CALL(ncclGroupStart());
         for (size_t j = 0; j < world_size; ++j) {
             int idx = i + j * n_expert;
-            if (global_expert_count[idx]) {
-                if (sent_models[idx]) {
+            if (global_expert_count[idx] && !sent_models[idx]) {
+                NCCL_SAFE_CALL(ncclSend(
+                    output_buf + send_ptr * out_feat,
+                    global_expert_count[idx] * out_feat * sizeof(scalar_t),
+                    ncclChar,
+                    j,
+                    smgr->ncclcomm,
+                    smgr->stream(0)));
+                send_ptr += global_expert_count[idx];
+            }
+            if (local_expert_count[idx]) {
+                if (stored_models[idx]) {
                     checkCudaErrors(cudaMemcpyAsync(
                         local_output_buf + expert_ptr[idx] * out_feat,
                         output_buf + send_ptr * out_feat,
-                        global_expert_count[idx] * out_feat * sizeof(scalar_t),
+                        local_expert_count[idx] * out_feat * sizeof(scalar_t),
                         cudaMemcpyDeviceToDevice,
                         smgr->stream(1)));
                     send_ptr += local_expert_count[idx];
-
-                } else {
-                    NCCL_SAFE_CALL(ncclSend(
-                        output_buf + send_ptr * out_feat,
-                        global_expert_count[idx] * out_feat * sizeof(scalar_t),
-                        ncclChar,
-                        j,
-                        smgr->ncclcomm,
-                        smgr->stream(0)));
-                    send_ptr += global_expert_count[idx];
-                }
-            }
-            if (local_expert_count[idx] && !stored_models[idx]) {
-                NCCL_SAFE_CALL(ncclRecv(
+                } else{
+                    NCCL_SAFE_CALL(ncclRecv(
                         local_output_buf + expert_ptr[idx] * out_feat, 
                         local_expert_count[idx] * out_feat * sizeof(scalar_t),
                         ncclChar, 
                         j,
                         smgr->ncclcomm,
                         smgr->stream(0)));
+                }
             }
         }
         NCCL_SAFE_CALL(ncclGroupEnd());

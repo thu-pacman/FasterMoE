@@ -60,7 +60,7 @@ torch::Tensor _global_gather(
 
     auto n_expert = local_expert_count.size(0) / n_workers;
     auto out_feat = output_buf.size(1);
-    auto local_output_buf = output_buf.new_empty({batch_size, out_feat});
+    auto local_output_buf = output_buf.new_zeros({batch_size, out_feat});
     auto smgr = getCudaStreamManager(output_buf.device().index());
 
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(output_buf.scalar_type(), 
