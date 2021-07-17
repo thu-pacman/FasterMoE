@@ -293,11 +293,12 @@ void fmoe_cuda_gradient_exchange_impl(
                 if (j == rank) continue;
 
                 size_t idx = i + j * num_expert;
+                auto count = local_grads[i][param_idx].numel();
 
                 if (sent_models[idx]) {
                     scalar_t * param = storage[i][param_idx].data_ptr<scalar_t>();
                     NCCL_SAFE_CALL(ncclRecv(
-                        param + recv_ptr * size,
+                        param + recv_ptr * count,
                         size,
                         ncclChar,
                         j,
@@ -324,6 +325,8 @@ void fmoe_cuda_gradient_exchange_impl(
     }
 
     smgr->sync(1);
+    checkCudaErrors(cudaGetLastError());
+
     for (int i = 0; i < num_expert; i++) {
         for (int k = 0; k < local_grads[i].size(); k++) {
             storage[i][k] = storage[i][k].sum(0);
