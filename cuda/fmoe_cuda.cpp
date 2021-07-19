@@ -29,8 +29,8 @@ std::vector<torch::Tensor> _exchange_cache_info(
 int _model_exchange(
         torch::Tensor sent_models,
         torch::Tensor stored_models,
-        std::vector<std::vector<torch::Tensor>> local_params,
-        std::vector<std::vector<std::vector<torch::Tensor>>> params,
+        std::vector<torch::Tensor> local_params,
+        std::vector<std::vector<torch::Tensor>> params,
         long num_expert, long world_size);
 torch::Tensor _generate_cached_count(
         torch::Tensor local_expert_count,
@@ -41,8 +41,8 @@ torch::Tensor _generate_cached_count(
 void _gradient_exchange(
         torch::Tensor sent_models,
         torch::Tensor stored_models,
-        std::vector<std::vector<torch::Tensor>> local_grads,
-        std::vector<std::vector<std::vector<torch::Tensor>>> grads,
+        std::vector<torch::Tensor> local_grads,
+        std::vector<std::vector<torch::Tensor>> grads,
         long num_expert, long world_size);
 
 void _ensure_nccl(c10d::ProcessGroupNCCL& p, torch::Tensor t);

@@ -137,20 +137,16 @@ std::vector<torch::Tensor> _exchange_cache_info(
 int _model_exchange(
         torch::Tensor sent_models,
         torch::Tensor stored_models,
-        std::vector<std::vector<torch::Tensor>> local_params,
-        std::vector<std::vector<std::vector<torch::Tensor>>> params,
+        std::vector<torch::Tensor> local_params,
+        std::vector<std::vector<torch::Tensor>> params,
         long num_expert, long world_size) {
 
     for (int j = 0; j < num_expert; j++) {
-        for (auto t : local_params[j]) {
-            CHECK_INPUT(t);
-        }
+        CHECK_INPUT(local_params[j]);
 
         for (int i = 0; i < world_size; i++){
             if (params[i].size() <= 0) continue;
-            for (auto t : params[i][j]) {
-                CHECK_INPUT(t);
-            }
+            CHECK_INPUT(params[i][j]);
         }
     }
 
@@ -202,20 +198,16 @@ torch::Tensor _generate_cached_count(
 void _gradient_exchange(
         torch::Tensor sent_models,
         torch::Tensor stored_models,
-        std::vector<std::vector<torch::Tensor>> local_grads,
-        std::vector<std::vector<std::vector<torch::Tensor>>> grads,
+        std::vector<torch::Tensor> local_grads,
+        std::vector<std::vector<torch::Tensor>> grads,
         long num_expert, long world_size) {
 
     for (int j = 0; j < num_expert; j++) {
-        for (auto t : local_grads[j]) {
-            CHECK_INPUT(t);
-        }
+        CHECK_INPUT(local_grads[j]);
 
         for (int i = 0; i < world_size; i++){
             if (grads[i].size() <= 0) continue;
-            for (auto t : grads[i][j]) {
-                CHECK_INPUT(t);
-            }
+            CHECK_INPUT(grads[i][j]);
         }
     }
 

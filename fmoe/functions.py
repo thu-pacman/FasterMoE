@@ -8,6 +8,7 @@ import torch
 from torch.autograd import Function
 import fmoe_cuda
 from .utils import get_torch_default_comm
+from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 from copy import deepcopy
 
 def _ensure_nccl(t, comm=None):
@@ -87,7 +88,7 @@ def _generate_model_parameters(sent_models, stored_models, experts, fused):
     TODO this function assumes all nodes have the same experts
     """
     if fused:
-        local_params = [list(experts.parameters())]
+        local_params = [_flatten_dense_tensors(tuple(experts.parameters()))]
 
         fetch_models = [
             [deepcopy(experts)]
@@ -98,9 +99,21 @@ def _generate_model_parameters(sent_models, stored_models, experts, fused):
     else:
         raise NotImplementedError('No fused yet')
 
-    fetch_params = [[list(m.parameters()) for m in node] for node in fetch_models]
+    fetch_params = [[_flatten_dense_tensors(tuple(m.parameters())) for m in node] for node in fetch_models]
     return local_params, fetch_params, fetch_models
 
+def _update_fetched_model_params(models, model_params):
+    for node in range(len(model_params)):
+        for expert in range(len(model_params[node])):
+            old_params = tuple(models[node][expert].parameters())
+            for old, new in zip(old_params, _unflatten_dense_tensors(model_params[node][expert], old_params)):
+                old.copy_(new)
+
+def _update_local_model_params(experts, gradients):
+    for expert in range(len(experts)):
+        old_params = tuple(experts[expert].parameters())
+        for old, new in zip(old_params, _unflatten_dense_tensors(gradients[expert], old_params)):
+            old.grad.copy_(new)
 
 class MOECache(Function):
     r"""
@@ -146,6 +159,8 @@ class MOECache(Function):
                 sent_models = sent_models.view(world_size, 1).repeat(1, num_expert)
                 stored_models = stored_models.view(world_size, 1).repeat(1, num_expert)    
             
+            _update_fetched_model_params(models, all_params)
+
             # now we need to include information about all the local experts that will run
             # num_expert * world_size tensor
             fwd_expert_count = fmoe_cuda.generate_cached_count(local_expert_count.cuda(), global_expert_count.cuda(), sent_models.cuda(), stored_models.cuda(), num_expert, world_size).cpu()
@@ -165,8 +180,8 @@ class MOECache(Function):
         local_experts = models[i]
         models[i] = [] # remove self from list
 
-        gradients = [[[x.grad for x in m.parameters()] for m in node] for node in models]
-        local_gradients = [[x.grad for x in m.parameters()] for m in local_experts]
+        gradients = [[_flatten_dense_tensors([x.grad for x in m.parameters()]) for m in node] for node in models]
+        local_gradients = [_flatten_dense_tensors([x.grad for x in m.parameters()]) for m in local_experts]
 
         world_size = sent_models.shape[0]
         num_expert = len(local_experts)
@@ -177,7 +192,9 @@ class MOECache(Function):
             stored_models = stored_models.any(dim=1)
         
         fmoe_cuda.gradient_exchange(sent_models, stored_models, local_gradients, gradients, num_expert, world_size)
-        
+
+        _update_local_model_params(local_experts, local_gradients)
+
         return inp, None, None, None, None, None, None, None, None, None, None, None
 
 class MOEScatter(Function):

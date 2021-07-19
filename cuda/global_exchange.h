@@ -194,58 +194,62 @@ template<typename scalar_t>
 void fmoe_cuda_model_exchange_impl(
     bool * sent_models, 
     bool * stored_models, 
-    std::vector<std::vector<torch::Tensor>> local_params, 
-    std::vector<std::vector<std::vector<torch::Tensor>>> params, 
+    std::vector<torch::Tensor> local_params, 
+    std::vector<std::vector<torch::Tensor>> params, 
     long num_expert, 
     long world_size,
     CudaStreamManager * smgr) {
     
     int rank;
     NCCL_SAFE_CALL(ncclCommUserRank(smgr->ncclcomm, &rank));
-
+    size_t amount_sent = 0, amount_received = 0;
 
     for (size_t i = 0; i < num_expert; i++) {
-        for (size_t param_idx = 0; param_idx < local_params[i].size(); param_idx++) {
-            NCCL_SAFE_CALL(ncclGroupStart());
-            
-            // size in bytes
-            auto size = local_params[i][param_idx].numel() * sizeof(scalar_t);
-            
-            for (size_t j = 0; j < world_size; j++) {
-                if (j == rank) continue;
+        // for (size_t param_idx = 0; param_idx < local_params[i].size(); param_idx++) {
 
-                size_t idx = i + j * num_expert;
+        NCCL_SAFE_CALL(ncclGroupStart());
+        
+        // size in bytes
+        auto size = local_params[i].numel() * sizeof(scalar_t);
+        
+        for (size_t j = 0; j < world_size; j++) {
+            if (j == rank) continue;
 
-                if (sent_models[idx]) {
-                    scalar_t * param = local_params[i][param_idx].data_ptr<scalar_t>();
-                    // printf("Send %ld %ld %ld\n", i,j,param_idx);
-                    NCCL_SAFE_CALL(ncclSend(
-                        param,
-                        size,
-                        ncclChar,
-                        j,
-                        smgr->ncclcomm,
-                        smgr->stream(0)));
-                }
+            size_t idx = i + j * num_expert;
 
-                if (stored_models[idx]) {
-                    scalar_t * param = params[j][i][param_idx].data_ptr<scalar_t>();
-                    // printf("Recv %ld %ld %ld\n", i,j,param_idx);
-                    NCCL_SAFE_CALL(ncclRecv(
-                        param,
-                        size,
-                        ncclChar,
-                        j,
-                        smgr->ncclcomm,
-                        smgr->stream(0)));
-                }
+            if (sent_models[idx]) {
+                scalar_t * param = local_params[i].data_ptr<scalar_t>();
+                // printf("Send %ld %ld %ld\n", i,j,param_idx);
+                NCCL_SAFE_CALL(ncclSend(
+                    param,
+                    size,
+                    ncclChar,
+                    j,
+                    smgr->ncclcomm,
+                    smgr->stream(0)));
+                amount_sent += size;
             }
-            
-            NCCL_SAFE_CALL(ncclGroupEnd());
+
+            if (stored_models[idx]) {
+                scalar_t * param = params[j][i].data_ptr<scalar_t>();
+                // printf("Recv %ld %ld %ld\n", i,j,param_idx);
+                NCCL_SAFE_CALL(ncclRecv(
+                    param,
+                    size,
+                    ncclChar,
+                    j,
+                    smgr->ncclcomm,
+                    smgr->stream(0)));
+                amount_received += size;
+            }
         }
+        
+        NCCL_SAFE_CALL(ncclGroupEnd());
+        // }
     }
 
     smgr->sync(1);
+    // printf("Model exchange: Sent %ld Received %ld\n", amount_sent, amount_received);
 }
 
 
@@ -254,84 +258,82 @@ void fmoe_cuda_gradient_exchange_impl(
     bool * sent_models, 
     bool * stored_models, 
     long * expert_counts,
-    std::vector<std::vector<torch::Tensor>> local_grads, 
-    std::vector<std::vector<std::vector<torch::Tensor>>> grads, 
+    std::vector<torch::Tensor> local_grads, 
+    std::vector<std::vector<torch::Tensor>> grads, 
     long num_expert, 
     long world_size,
     CudaStreamManager * smgr) {
 
     int rank;
     NCCL_SAFE_CALL(ncclCommUserRank(smgr->ncclcomm, &rank));
-    
-    auto storage = std::vector<std::vector<torch::Tensor>>(num_expert);
+    size_t amount_sent = 0, amount_received = 0;
+
+    auto storage = std::vector<torch::Tensor>();
 
     // Creates the tensors with the required size according to how many models to fetch
     // ex: (2,3) sent to 4 nodes, creates (4,2,3)
     for (int i = 0; i < num_expert; i++) {
-        for (auto t : local_grads[i]) {
-            auto sizes = t.sizes();
-            std::vector<long> shape;
-            shape.push_back(expert_counts[i]);
-            for (auto v : sizes) {
-                shape.push_back(v);
-            }
-            
-            c10::IntArrayRef x(shape);
-            storage[i].push_back(t.new_zeros(x));
+        auto sizes = local_grads[i].sizes();
+        std::vector<long> shape;
+        shape.push_back(expert_counts[i]);
+        for (auto v : sizes) {
+            shape.push_back(v);
         }
+        
+        c10::IntArrayRef x(shape);
+        storage.push_back(local_grads[i].new_zeros(x));
     }
 
     for (int i = 0; i < num_expert; i++) {
-        for (size_t param_idx = 0; param_idx < local_grads[i].size(); param_idx++) {
-            NCCL_SAFE_CALL(ncclGroupStart());
-            
-            // size in bytes
-            auto size = local_grads[i][param_idx].numel() * sizeof(scalar_t);
-            
-            int recv_ptr = 0;
-            for (size_t j = 0; j < world_size; j++) {
-                if (j == rank) continue;
+        NCCL_SAFE_CALL(ncclGroupStart());
+        
+        // size in bytes
+        auto size = local_grads[i].numel() * sizeof(scalar_t);
+        
+        int recv_ptr = 0;
+        for (size_t j = 0; j < world_size; j++) {
+            if (j == rank) continue;
 
-                size_t idx = i + j * num_expert;
-                auto count = local_grads[i][param_idx].numel();
+            size_t idx = i + j * num_expert;
+            auto count = local_grads[i].numel();
 
-                if (sent_models[idx]) {
-                    scalar_t * param = storage[i][param_idx].data_ptr<scalar_t>();
-                    NCCL_SAFE_CALL(ncclRecv(
-                        param + recv_ptr * count,
-                        size,
-                        ncclChar,
-                        j,
-                        smgr->ncclcomm,
-                        smgr->stream(0)));
-                    
-                    recv_ptr++;
-                }
-
-                if (stored_models[idx]) {
-                    scalar_t * param = grads[j][i][param_idx].data_ptr<scalar_t>();
-                    NCCL_SAFE_CALL(ncclSend(
-                        param,
-                        size,
-                        ncclChar,
-                        j,
-                        smgr->ncclcomm,
-                        smgr->stream(0)));
-                }
+            if (sent_models[idx]) {
+                scalar_t * param = storage[i].data_ptr<scalar_t>();
+                NCCL_SAFE_CALL(ncclRecv(
+                    param + recv_ptr * count,
+                    size,
+                    ncclChar,
+                    j,
+                    smgr->ncclcomm,
+                    smgr->stream(0)));
+                
+                recv_ptr++;
+                amount_received += size;
             }
-            
-            NCCL_SAFE_CALL(ncclGroupEnd());
+
+            if (stored_models[idx]) {
+                scalar_t * param = grads[j][i].data_ptr<scalar_t>();
+                NCCL_SAFE_CALL(ncclSend(
+                    param,
+                    size,
+                    ncclChar,
+                    j,
+                    smgr->ncclcomm,
+                    smgr->stream(0)));
+                amount_sent += size;
+            }
         }
+        
+        NCCL_SAFE_CALL(ncclGroupEnd());
     }
 
     smgr->sync(1);
     checkCudaErrors(cudaGetLastError());
+    // printf("Gradient exchange: Sent %ld Received %ld\n", amount_sent, amount_received);
 
     for (int i = 0; i < num_expert; i++) {
-        for (int k = 0; k < local_grads[i].size(); k++) {
-            storage[i][k] = storage[i][k].sum(0);
-            local_grads[i][k].add_(storage[i][k]).div_(expert_counts[i] + 1); // TODO do we average them or just sum them?
-        }
+        storage[i] = storage[i].sum(0);
+        local_grads[i].add_(storage[i]).div_(expert_counts[i] + 1); // TODO do we average them or just sum them?
     }
 }
 
