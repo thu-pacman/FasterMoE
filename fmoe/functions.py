@@ -139,18 +139,18 @@ class MOECache(Function):
             selection = policy_fn(fwd_expert_count, global_expert_count, batch_size, topk)
             
             # sent_models is the information of which models to send and to where according to the previous selection. stored_models will contain the info of where to fetch models from
-            sent_models, stored_models = [x.cpu() for x in fmoe_cuda.exchange_cache_info(selection.cuda(), num_expert, world_size)]
-
+            sent_models, stored_models, broadcast = [x.cpu() for x in fmoe_cuda.exchange_cache_info(selection.cuda(), num_expert, world_size)]
             local_params, all_params, models = _generate_model_parameters(sent_models, stored_models, experts, fused)
             
             if not fused:
-                fmoe_cuda.model_exchange(sent_models, stored_models, local_params, all_params, num_expert, world_size, fused)
+                fmoe_cuda.model_exchange(sent_models, stored_models, broadcast, local_params, all_params, num_expert, world_size, fused)
             else:
                 sent_models = sent_models.any(dim=1)
                 stored_models =  stored_models.any(dim=1)
+                broadcast = broadcast.any(dim=1)
                 
                 # TODO should we extract this value?
-                i = fmoe_cuda.model_exchange(sent_models, stored_models, local_params, all_params, 1, world_size)
+                i = fmoe_cuda.model_exchange(sent_models, stored_models, broadcast, local_params, all_params, 1, world_size)
                 
                 # add self node's experts to the list without copying
                 models[i] = [experts]
@@ -158,6 +158,7 @@ class MOECache(Function):
                 # Because we are fusing, all other experts will be sent together
                 sent_models = sent_models.view(world_size, 1).repeat(1, num_expert)
                 stored_models = stored_models.view(world_size, 1).repeat(1, num_expert)    
+                broadcast = broadcast.view(world_size, 1).repeat(1,num_expert)
             
             _update_fetched_model_params(models, all_params)
 

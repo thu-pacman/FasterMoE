@@ -128,15 +128,24 @@ std::vector<torch::Tensor> _exchange_cache_info(
     auto smgr = getCudaStreamManager(sent_models.device().index());
 
     torch::Tensor stored_models = sent_models.new_zeros({world_size, num_expert});
+    torch::Tensor will_broadcast = sent_models.all(0);
+    torch::Tensor broadcast = sent_models.new_zeros({world_size, num_expert});
 
-    fmoe_cuda_exchange_cache_info_impl(sent_models.data_ptr<bool>(), stored_models.data_ptr<bool>(), num_expert, world_size, smgr);
+    fmoe_cuda_exchange_cache_info_impl(
+        sent_models.data_ptr<bool>(),
+        stored_models.data_ptr<bool>(),
+        will_broadcast.data_ptr<bool>(),
+        broadcast.data_ptr<bool>(),
+        num_expert, world_size,
+        smgr);
 
-    return {sent_models, stored_models};
+    return {sent_models, stored_models, broadcast};
 }
 
 int _model_exchange(
         torch::Tensor sent_models,
         torch::Tensor stored_models,
+        torch::Tensor broadcast,
         std::vector<torch::Tensor> local_params,
         std::vector<std::vector<torch::Tensor>> params,
         long num_expert, long world_size) {
@@ -157,6 +166,7 @@ int _model_exchange(
         fmoe_cuda_model_exchange_impl<scalar_t>(
             sent_models.data_ptr<bool>(),
             stored_models.data_ptr<bool>(),
+            broadcast.data_ptr<bool>(),
             local_params,
             params,
             num_expert, world_size, // TODO should fused be here

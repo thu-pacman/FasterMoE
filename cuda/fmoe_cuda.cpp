@@ -29,6 +29,7 @@ std::vector<torch::Tensor> _exchange_cache_info(
 int _model_exchange(
         torch::Tensor sent_models,
         torch::Tensor stored_models,
+        torch::Tensor broadcast,
         std::vector<torch::Tensor> local_params,
         std::vector<std::vector<torch::Tensor>> params,
         long num_expert, long world_size);

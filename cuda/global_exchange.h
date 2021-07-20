@@ -150,6 +150,8 @@ void fmoe_cuda_global_gather_impl(
 void fmoe_cuda_exchange_cache_info_impl(
     bool * sent_models,
     bool * stored_models,
+    bool * will_broadcast,
+    bool * broadcast,
     long num_expert,
     long world_size,
     CudaStreamManager * smgr) {
@@ -158,7 +160,7 @@ void fmoe_cuda_exchange_cache_info_impl(
     NCCL_SAFE_CALL(ncclCommUserRank(smgr->ncclcomm, &rank));
 
     NCCL_SAFE_CALL(ncclGroupStart());
-
+    // Sent caching information
     for (int i = 0; i < world_size; i++) {
         if (i == rank) {
             checkCudaErrors(cudaMemsetAsync(
@@ -185,18 +187,28 @@ void fmoe_cuda_exchange_cache_info_impl(
             smgr->ncclcomm,
             smgr->stream(0)));
     }
-
     NCCL_SAFE_CALL(ncclGroupEnd());
+
+    // exchange broadcast information
+    NCCL_SAFE_CALL(ncclAllGather(
+        will_broadcast,
+        broadcast,
+        num_expert,
+        ncclChar,
+        smgr->ncclcomm,
+        smgr->stream(0)));
+
     smgr->sync(2);
 }
 
 template<typename scalar_t>
 void fmoe_cuda_model_exchange_impl(
-    bool * sent_models, 
-    bool * stored_models, 
-    std::vector<torch::Tensor> local_params, 
-    std::vector<std::vector<torch::Tensor>> params, 
-    long num_expert, 
+    bool * sent_models,
+    bool * stored_models,
+    bool * broadcast,
+    std::vector<torch::Tensor> local_params,
+    std::vector<std::vector<torch::Tensor>> params,
+    long num_expert,
     long world_size,
     CudaStreamManager * smgr) {
     
@@ -205,7 +217,6 @@ void fmoe_cuda_model_exchange_impl(
     size_t amount_sent = 0, amount_received = 0;
 
     for (size_t i = 0; i < num_expert; i++) {
-        // for (size_t param_idx = 0; param_idx < local_params[i].size(); param_idx++) {
 
         NCCL_SAFE_CALL(ncclGroupStart());
         
@@ -217,7 +228,7 @@ void fmoe_cuda_model_exchange_impl(
 
             size_t idx = i + j * num_expert;
 
-            if (sent_models[idx]) {
+            if (sent_models[idx] && !broadcast[i + rank * num_expert]) {
                 scalar_t * param = local_params[i].data_ptr<scalar_t>();
                 // printf("Send %ld %ld %ld\n", i,j,param_idx);
                 NCCL_SAFE_CALL(ncclSend(
@@ -230,7 +241,7 @@ void fmoe_cuda_model_exchange_impl(
                 amount_sent += size;
             }
 
-            if (stored_models[idx]) {
+            if (stored_models[idx] && !broadcast[idx]) {
                 scalar_t * param = params[j][i].data_ptr<scalar_t>();
                 // printf("Recv %ld %ld %ld\n", i,j,param_idx);
                 NCCL_SAFE_CALL(ncclRecv(
@@ -245,7 +256,25 @@ void fmoe_cuda_model_exchange_impl(
         }
         
         NCCL_SAFE_CALL(ncclGroupEnd());
-        // }
+    }
+
+    // send broadcasted data
+    for (size_t i = 0; i < num_expert; i++) {
+        for (size_t j = 0; j < world_size; j++) {
+            auto idx = i + j * num_expert;
+            if (broadcast[idx]) {
+                scalar_t * param = j == rank ? local_params[i].data_ptr<scalar_t>() : params[j][i].data_ptr<scalar_t>();
+                // std::cout << "broadcast idx " << idx << std::endl;
+                NCCL_SAFE_CALL(ncclBroadcast(
+                    param,
+                    param,
+                    local_params[i].numel() * sizeof(scalar_t),
+                    ncclChar,
+                    j,
+                    smgr->ncclcomm,
+                    smgr->stream(0)));
+            }
+        }
     }
 
     smgr->sync(1);
