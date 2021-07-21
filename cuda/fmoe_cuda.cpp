@@ -42,6 +42,7 @@ torch::Tensor _generate_cached_count(
 void _gradient_exchange(
         torch::Tensor sent_models,
         torch::Tensor stored_models,
+        torch::Tensor broadcast,
         std::vector<torch::Tensor> local_grads,
         std::vector<std::vector<torch::Tensor>> grads,
         long num_expert, long world_size);

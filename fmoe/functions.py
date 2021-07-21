@@ -169,14 +169,14 @@ class MOECache(Function):
         else:
             raise NotImplementedError
 
-        variables = (sent_models, stored_models)
+        variables = (sent_models, stored_models, broadcast)
         ctx.save_for_backward(*variables)
         ctx.models = models, i
         return inp, models, sent_models, stored_models, fwd_expert_count, int(fwd_expert_count.sum().item())
 
     @staticmethod
     def backward(ctx, inp, models, sent_models, stored_models, fwd_expert_count, fwd_batch_size):
-        sent_models, stored_models = ctx.saved_tensors
+        sent_models, stored_models, broadcast = ctx.saved_tensors
         models, i = ctx.models
         local_experts = models[i]
         models[i] = [] # remove self from list
@@ -192,7 +192,7 @@ class MOECache(Function):
             sent_models = sent_models.any(dim=1)
             stored_models = stored_models.any(dim=1)
         
-        fmoe_cuda.gradient_exchange(sent_models, stored_models, local_gradients, gradients, num_expert, world_size)
+        fmoe_cuda.gradient_exchange(sent_models, stored_models, broadcast, local_gradients, gradients, num_expert, world_size)
 
         _update_local_model_params(local_experts, local_gradients)
 

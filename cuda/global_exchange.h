@@ -285,7 +285,8 @@ void fmoe_cuda_model_exchange_impl(
 template<typename scalar_t>
 void fmoe_cuda_gradient_exchange_impl(
     bool * sent_models, 
-    bool * stored_models, 
+    bool * stored_models,
+    bool * broadcast, 
     long * expert_counts,
     std::vector<torch::Tensor> local_grads, 
     std::vector<std::vector<torch::Tensor>> grads, 
@@ -326,7 +327,7 @@ void fmoe_cuda_gradient_exchange_impl(
             size_t idx = i + j * num_expert;
             auto count = local_grads[i].numel();
 
-            if (sent_models[idx]) {
+            if (sent_models[idx] && !broadcast[i + rank * num_expert]) {
                 scalar_t * param = storage[i].data_ptr<scalar_t>();
                 NCCL_SAFE_CALL(ncclRecv(
                     param + recv_ptr * count,
@@ -340,7 +341,7 @@ void fmoe_cuda_gradient_exchange_impl(
                 amount_received += size;
             }
 
-            if (stored_models[idx]) {
+            if (stored_models[idx] && !broadcast[idx]) {
                 scalar_t * param = grads[j][i].data_ptr<scalar_t>();
                 NCCL_SAFE_CALL(ncclSend(
                     param,
@@ -354,6 +355,28 @@ void fmoe_cuda_gradient_exchange_impl(
         }
         
         NCCL_SAFE_CALL(ncclGroupEnd());
+    }
+
+    // send back broadcasted data
+    for (size_t i = 0; i < num_expert; i++) {
+        for (size_t j = 0; j < world_size; j++) {
+            auto idx = i + j * num_expert;
+            if (broadcast[idx]) {
+                scalar_t * param = j == rank ? storage[i].data_ptr<scalar_t>() : grads[j][i].data_ptr<scalar_t>();
+
+                auto size = local_grads[i].numel() * sizeof(scalar_t);
+                
+                NCCL_SAFE_CALL(ncclReduce(
+                    param,
+                    param,
+                    size,
+                    ncclChar,
+                    ncclSum,
+                    j,
+                    smgr->ncclcomm,
+                    smgr->stream(0)));
+            }
+        }
     }
 
     smgr->sync(1);
