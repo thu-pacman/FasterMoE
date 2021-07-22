@@ -191,6 +191,7 @@ class MOECache(Function):
             # fused
             sent_models = sent_models.any(dim=1)
             stored_models = stored_models.any(dim=1)
+            broadcast = broadcast.any(dim=1)
         
         fmoe_cuda.gradient_exchange(sent_models, stored_models, broadcast, local_gradients, gradients, num_expert, world_size)
 
