@@ -127,9 +127,9 @@ def _default_policy(fwd_expert_count, global_expert_count, batch_size, topk):
     r"""
     TODO find a better policy
 
-    Must return a global_expert_count shaped tensor with the status of each (node, expert) as a bool tensor
+    Must return a fwd_expert_count shaped tensor with the status of each local expert as a bool tensor
     """
-    return (fwd_expert_count > batch_size / 2) * global_expert_count.bool()
+    return (fwd_expert_count > batch_size)
 
 class FMoE(nn.Module):
     r"""
@@ -198,12 +198,14 @@ class FMoE(nn.Module):
         """
         res = []
         
-        input_ptr = 0        
+        input_ptr = 0
         for j, counts in enumerate(fwd_expert_count.view(-1, num_expert)):
             size = counts.sum().item()
+            if not size:
+                continue
+
             node_inp = inp[input_ptr:input_ptr + size]
             input_ptr += size
-            
             experts = models[j] # node j's experts
 
             if not experts:
