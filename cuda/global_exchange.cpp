@@ -214,16 +214,13 @@ void _gradient_exchange(
             CHECK_INPUT(grads[i][j]);
         }
     }
+    auto smgr = getCudaStreamManager(local_grads[0].device().index());
 
-    auto smgr = getCudaStreamManager(local_grads[0][0].device().index());
-    auto expert_counts = sent_models.sum(0); // number of nodes to get the grads back from
-
-    AT_DISPATCH_FLOATING_TYPES_AND_HALF(local_grads[0][0].scalar_type(), 
+    AT_DISPATCH_FLOATING_TYPES_AND_HALF(local_grads[0].scalar_type(), 
             "fmoe_cuda_gradient_exchange", ([&] {
         fmoe_cuda_gradient_exchange_impl<scalar_t>(
             sent_models.data_ptr<bool>(),
             stored_models.data_ptr<bool>(),
-            expert_counts.data_ptr<long int>(),
             local_grads,
             grads,
             num_expert, world_size, // TODO should fused be here

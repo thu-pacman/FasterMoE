@@ -42,20 +42,11 @@ void fmoe_cuda_global_scatter_impl(
     // assert world_size > 1
     int recv_ptr = 0;
     /* TODO: may save for backward */
-    long *expert_ptr = new long[n_expert * world_size];
-    long *recv_expert_ptr = new long[n_expert * world_size];
-    
+    long*expert_ptr = new long[n_expert * world_size];
     expert_ptr[0] = 0;
-    recv_expert_ptr[0] = 0;
     for (size_t i = 1; i < n_expert * world_size; ++i) {
         expert_ptr[i] = expert_ptr[i - 1] + local_expert_count[i - 1];
-        recv_expert_ptr[i] = recv_expert_ptr[i - 1] + (stored_models[i - 1] ? 0 : global_expert_count[i - 1]);
     }
-
-    std::cout << "Scatter ";
-    for (size_t i = 0; i < n_expert * world_size; i++)
-        std::cout << recv_expert_ptr[i] << " ";
-    std::cout << std::endl;
 
     for (size_t i = 0; i < n_expert; ++i) {
         NCCL_SAFE_CALL(ncclGroupStart());
@@ -70,7 +61,6 @@ void fmoe_cuda_global_scatter_impl(
                         local_expert_count[idx] * in_feat * sizeof(scalar_t),
                         cudaMemcpyDeviceToDevice,
                         smgr->stream(1)));
-                    printf("Local idx=%d size=%d recv_ptr=%d expert_ptr=%d\n", idx, local_expert_count[idx], recv_ptr, expert_ptr[idx]);
                     recv_ptr += local_expert_count[idx];
                 } else {
                     NCCL_SAFE_CALL(ncclSend(
@@ -80,7 +70,6 @@ void fmoe_cuda_global_scatter_impl(
                         j,
                         smgr->ncclcomm,
                         smgr->stream(0)));
-                    printf("Send idx=%d size=%d expert_ptr=%d\n", idx, local_expert_count[idx], expert_ptr[idx]);
                 }
             }
             if (global_expert_count[idx] && !sent_models[i]) {
@@ -91,7 +80,6 @@ void fmoe_cuda_global_scatter_impl(
                         j,
                         smgr->ncclcomm,
                         smgr->stream(0)));
-                printf("Recv idx=%d size=%d recv_ptr=%d\n", idx, global_expert_count[idx], recv_ptr);
                 recv_ptr += global_expert_count[idx];
             }
         }
@@ -114,19 +102,11 @@ void fmoe_cuda_global_gather_impl(
     long send_ptr = 0;
     /* TODO: may save for backward */
     long *expert_ptr = new long[n_expert * world_size];
-    long *recv_expert_ptr = new long[n_expert * world_size];
     
     expert_ptr[0] = 0;
-    recv_expert_ptr[0] = 0;
     for (size_t i = 1; i < n_expert * world_size; ++i) {
         expert_ptr[i] = expert_ptr[i - 1] + local_expert_count[i - 1];
-        recv_expert_ptr[i] = recv_expert_ptr[i - 1] + (stored_models[i - 1] ? 0 : global_expert_count[i - 1]);
     }
-
-    std::cout << "Gather ";
-    for (size_t i = 0; i < n_expert * world_size; i++)
-        std::cout << recv_expert_ptr[i] << " ";
-    std::cout << std::endl;
 
     for (size_t i = 0; i < n_expert; ++i) {
         NCCL_SAFE_CALL(ncclGroupStart());
@@ -140,7 +120,6 @@ void fmoe_cuda_global_gather_impl(
                         local_expert_count[idx] * out_feat * sizeof(scalar_t),
                         cudaMemcpyDeviceToDevice,
                         smgr->stream(1)));
-                    printf("Local idx=%d size=%d send_ptr=%d expert_ptr=%d\n", idx, local_expert_count[idx], send_ptr, expert_ptr[idx]);
                     send_ptr += local_expert_count[idx];
                 } else{
                     NCCL_SAFE_CALL(ncclRecv(
@@ -150,7 +129,6 @@ void fmoe_cuda_global_gather_impl(
                         j,
                         smgr->ncclcomm,
                         smgr->stream(0)));
-                    printf("Recv idx=%d size=%d expert_ptr=%d\n", idx, local_expert_count[idx], expert_ptr[idx]);   
                 }
             }
 
@@ -162,7 +140,6 @@ void fmoe_cuda_global_gather_impl(
                     j,
                     smgr->ncclcomm,
                     smgr->stream(0)));
-                printf("Send idx=%d size=%d send_ptr=%d\n", idx, global_expert_count[idx], send_ptr);
                 send_ptr += global_expert_count[idx];
             }
         }
@@ -200,7 +177,6 @@ void fmoe_cuda_model_exchange_impl(
     long num_expert,
     long world_size,
     CudaStreamManager * smgr) {
-    
     int rank;
     NCCL_SAFE_CALL(ncclCommUserRank(smgr->ncclcomm, &rank));
 
@@ -232,7 +208,6 @@ template<typename scalar_t>
 void fmoe_cuda_gradient_exchange_impl(
     bool * sent_models, 
     bool * stored_models,
-    long * expert_counts,
     std::vector<torch::Tensor> local_grads, 
     std::vector<std::vector<torch::Tensor>> grads, 
     long num_expert, 

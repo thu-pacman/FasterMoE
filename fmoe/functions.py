@@ -129,14 +129,15 @@ class MOECache(Function):
         fwd_expert_count,
         policy_fn,
         experts,
-        batch_size, 
+        batch_size,
+        d_model,
         topk,
         num_expert, 
         world_size,
         fused, # for optimization
     ):
         if world_size > 1:
-            selection = policy_fn(fwd_expert_count, global_expert_count, batch_size, topk)
+            selection = policy_fn(fwd_expert_count, local_expert_count, global_expert_count, batch_size, d_model, topk)
             
             # sent_models is the information of which models to send and to where according to the previous selection. stored_models will contain the info of where to fetch models from
             sent_models, stored_models = [x.cpu() for x in fmoe_cuda.exchange_cache_info(selection.cuda(), num_expert, world_size)]
@@ -169,26 +170,24 @@ class MOECache(Function):
 
         variables = (sent_models, stored_models)
         ctx.save_for_backward(*variables)
-        ctx.models = models, i, fused
+        ctx.models = models, i, fused, num_expert, world_size
         return inp, models, sent_models, stored_models, fwd_expert_count, int(fwd_expert_count.sum().item())
 
     @staticmethod
     def backward(ctx, inp, models, sent_models, stored_models, fwd_expert_count, fwd_batch_size):
         sent_models, stored_models = ctx.saved_tensors
-        models, i, fused = ctx.models
+        models, i, fused, num_expert, world_size = ctx.models
         local_experts = models[i]
         models[i] = [] # remove self from list
 
         gradients = [[_flatten_dense_tensors([x.grad for x in m.parameters()]) for m in node] for node in models]
         local_gradients = [_flatten_dense_tensors([x.grad for x in m.parameters()]) for m in local_experts]
 
-        world_size = sent_models.shape[0]
-        num_expert = len(local_experts)
-
         if fused:
             sent_models = sent_models.any()
             stored_models = stored_models.any(dim=1)
-        
+            num_expert = 1
+
         fmoe_cuda.gradient_exchange(sent_models, stored_models, local_gradients, gradients, num_expert, world_size)
 
         _update_local_model_params(local_experts, local_gradients)

@@ -101,7 +101,7 @@ def _fmoe_general_global_forward(inp, gate, expert_fn, policy_fn, experts, num_e
         local_expert_count.view(world_size, num_expert), 
         global_expert_count.view(world_size, num_expert), 
         fwd_expert_count, policy_fn, experts,
-        inp.shape[0], topk, num_expert, world_size, fused)
+        inp.shape[0], inp.shape[1], topk, num_expert, world_size, fused)
 
     x = MOEScatter.apply(
         inp, pos // topk,
@@ -123,7 +123,7 @@ def _fmoe_general_global_forward(inp, gate, expert_fn, policy_fn, experts, num_e
     )
     return x
 
-def _default_policy(fwd_expert_count, global_expert_count, batch_size, topk):
+def _default_policy(fwd_expert_count, local_expert_count, global_expert_count, batch_size, d_model, topk):
     r"""
     TODO find a better policy
 
