@@ -113,7 +113,10 @@ def _update_local_model_params(experts, gradients):
     for expert in range(len(experts)):
         old_params = tuple(experts[expert].parameters())
         for old, new in zip(old_params, _unflatten_dense_tensors(gradients[expert], old_params)):
-            old.grad.copy_(new)
+            if torch.is_tensor(old.grad):
+                old.grad.copy_(new)
+            else:
+                old.grad = new
 
 class MOECache(Function):
     r"""
@@ -180,8 +183,8 @@ class MOECache(Function):
         local_experts = models[i]
         models[i] = [] # remove self from list
 
-        gradients = [[_flatten_dense_tensors([x.grad for x in m.parameters()]) for m in node] for node in models]
-        local_gradients = [_flatten_dense_tensors([x.grad for x in m.parameters()]) for m in local_experts]
+        gradients = [[_flatten_dense_tensors([x.grad if torch.is_tensor(x.grad) else torch.zeros(x.shape).cuda() for x in m.parameters()]) for m in node] for node in models]
+        local_gradients = [_flatten_dense_tensors([x.grad if torch.is_tensor(x.grad) else torch.zeros(x.shape).cuda() for x in m.parameters()]) for m in local_experts]
 
         if fused:
             sent_models = sent_models.any()

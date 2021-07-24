@@ -201,8 +201,6 @@ class FMoE(nn.Module):
         input_ptr = 0
         for j, counts in enumerate(fwd_expert_count.view(-1, num_expert)):
             size = counts.sum().item()
-            if not size:
-                continue
 
             node_inp = inp[input_ptr:input_ptr + size]
             input_ptr += size
