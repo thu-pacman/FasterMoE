@@ -90,6 +90,7 @@ def _fmoe_general_global_forward(inp, gate, expert_fn, policy_fn, experts, num_e
         pos,
         local_expert_count,
         global_expert_count,
+        all_expert_count,
         fwd_expert_count,
     ) = prepare_forward(gate, num_expert, world_size)
     topk = 1
@@ -98,6 +99,7 @@ def _fmoe_general_global_forward(inp, gate, expert_fn, policy_fn, experts, num_e
 
     inp, models, sent_models, stored_models, fwd_expert_count, fwd_batch_size = MOECache.apply(
         inp,
+        all_expert_count.view(world_size, world_size, num_expert),
         local_expert_count.view(world_size, num_expert), 
         global_expert_count.view(world_size, num_expert), 
         fwd_expert_count, policy_fn, experts,
@@ -123,7 +125,7 @@ def _fmoe_general_global_forward(inp, gate, expert_fn, policy_fn, experts, num_e
     )
     return x
 
-def _default_policy(fwd_expert_count, local_expert_count, global_expert_count, batch_size, d_model, topk):
+def _default_policy(fwd_expert_count, all_expert_count, local_expert_count, global_expert_count, batch_size, d_model, topk):
     r"""
     TODO find a better policy
 

@@ -5,18 +5,20 @@
 #ifdef FMOE_USE_NCCL
 #include <nccl.h>
 
-torch::Tensor _expert_exchange(
+std::vector<torch::Tensor> _expert_exchange(
         torch::Tensor local_expert_count,
         long n_expert, long n_workers) {
     auto global_expert_count = torch::empty_like(local_expert_count);
     auto smgr = getCudaStreamManager(local_expert_count.device().index());
+    auto all_expert_count = local_expert_count.new_empty({n_workers, n_workers, n_expert});
 
     fmoe_cuda_expert_exchange_impl(
             local_expert_count.data_ptr<long>(),
             global_expert_count.data_ptr<long>(),
+            all_expert_count.data_ptr<long>(),
             n_expert, n_workers,
             smgr);
-    return global_expert_count;
+    return {all_expert_count, global_expert_count};
 }
 
 torch::Tensor _global_scatter(

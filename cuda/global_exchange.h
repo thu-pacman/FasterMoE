@@ -6,26 +6,31 @@
 void fmoe_cuda_expert_exchange_impl(
         const long* local_expert_count, 
         long* global_expert_count, 
+        long * all_expert_count,
         int n_expert, int world_size,
         CudaStreamManager* smgr) {
-    NCCL_SAFE_CALL(ncclGroupStart());
-    for (int i = 0; i < world_size; ++i) {
-        NCCL_SAFE_CALL(ncclSend(
-                local_expert_count + n_expert * i,
-                n_expert,
-                ncclInt64,
-                i,
-                smgr->ncclcomm,
-                smgr->stream(0)));
-        NCCL_SAFE_CALL(ncclRecv(
-                global_expert_count + n_expert * i,
-                n_expert,
-                ncclInt64,
-                i,
-                smgr->ncclcomm,
-                smgr->stream(0)));
+    
+    int rank;
+    NCCL_SAFE_CALL(ncclCommUserRank(smgr->ncclcomm, &rank));
+
+    NCCL_SAFE_CALL(ncclAllGather(
+        local_expert_count,
+        all_expert_count,
+        world_size * n_expert * sizeof(long),
+        ncclChar,
+        smgr->ncclcomm,
+        smgr->stream(0)));
+
+    // TODO implement dedicated kernel
+    for (size_t i = 0; i < n_expert; i++) {
+        checkCudaErrors(cudaMemcpyAsync(
+            global_expert_count + i * n_expert,
+            all_expert_count + i * world_size * n_expert + rank * n_expert,
+            n_expert * sizeof(long),
+            cudaMemcpyDeviceToDevice,
+            smgr->stream(0)));
     }
-    NCCL_SAFE_CALL(ncclGroupEnd());
+
     smgr->sync(1);
 }
 
