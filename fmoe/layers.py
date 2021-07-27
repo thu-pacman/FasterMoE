@@ -97,7 +97,7 @@ def _fmoe_general_global_forward(inp, gate, expert_fn, policy_fn, experts, num_e
     if len(gate.shape) == 2:
         topk = gate.shape[1]
 
-    inp, models, sent_models, stored_models, fwd_expert_count, fwd_batch_size = MOECache.apply(
+    inp, models, stored_models, fwd_expert_count, fwd_batch_size = MOECache.apply(
         inp,
         all_expert_count.view(world_size, world_size, num_expert),
         local_expert_count.view(world_size, num_expert), 
@@ -108,7 +108,7 @@ def _fmoe_general_global_forward(inp, gate, expert_fn, policy_fn, experts, num_e
     x = MOEScatter.apply(
         inp, pos // topk,
         local_expert_count, global_expert_count, 
-        sent_models, stored_models,
+        stored_models,
         fwd_batch_size, world_size
     )
     x = expert_fn(x, models, fwd_expert_count, num_expert)
@@ -120,18 +120,48 @@ def _fmoe_general_global_forward(inp, gate, expert_fn, policy_fn, experts, num_e
     x = MOEGather.apply(
         x, pos,
         local_expert_count, global_expert_count,
-        sent_models, stored_models,
+        stored_models,
         out_batch_size, world_size
     )
     return x
 
-def _default_policy(fwd_expert_count, all_expert_count, local_expert_count, global_expert_count, batch_size, d_model, topk):
-    r"""
-    TODO find a better policy
-
-    Must return a fwd_expert_count shaped tensor with the status of each local expert as a bool tensor
-    """
-    return (fwd_expert_count > batch_size)
+def _default_policy(all_experts_count, world_size, d_model):                         
+    bw_pcie = 88 * 1e9 / 8                     
+    bw_net = 50 * 1e9 / 8                                      
+    bw_mm = 11.5e12
+    # print(all_experts_count)
+    fwd_expert_counts = all_experts_count.sum(0)
+    default_counts = fwd_expert_counts.clone()
+    
+    _, indices = fwd_expert_counts.sort(0, descending=True)
+    global_expert_counts = torch.tensor([[y[i] for y in all_experts_count] for i,_ in enumerate(all_experts_count)])
+    
+    alphaHsquared = d_model * (d_model**2) * 4**2
+    
+    slowest = default_counts.max(0)[0]
+    lat_comp = 12 * slowest * alphaHsquared / bw_mm  + 4 * slowest * d_model * 4 / bw_net
+    
+    prev = float('+inf')
+    model_size = 4 * alphaHsquared / bw_net
+    comp_time = 12 * alphaHsquared / bw_mm
+    
+    for i, index in enumerate(indices):
+        fwd_expert_counts[index] -= global_expert_counts[index].sum()
+        fwd_expert_counts += global_expert_counts[index].view(world_size, -1)
+        
+        lat_comm = fwd_expert_counts.max(0)[0] * comp_time + i * model_size
+        
+        if lat_comm < prev:
+            prev = lat_comm
+        elif lat_comm > prev:
+            # print('stopped at', i)
+            break
+    
+    res = torch.zeros(all_experts_count[0].shape, dtype=bool)
+    if lat_comp > prev:
+        res[indices[:i]] = True
+    
+    return res
 
 class FMoE(nn.Module):
     r"""

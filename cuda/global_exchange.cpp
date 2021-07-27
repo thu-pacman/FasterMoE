@@ -25,7 +25,6 @@ torch::Tensor _global_scatter(
         torch::Tensor input_buf,
         torch::Tensor local_expert_count,
         torch::Tensor global_expert_count,
-        torch::Tensor sent_models, 
         torch::Tensor stored_models,
         long batch_size, long n_workers) {
     CHECK_INPUT(input_buf);
@@ -42,7 +41,6 @@ torch::Tensor _global_scatter(
             local_expert_count.data_ptr<long>(),
             global_expert_count.data_ptr<long>(),
             global_input_buf.data_ptr<scalar_t>(),
-            sent_models.data_ptr<bool>(),
             stored_models.data_ptr<bool>(),
             in_feat, n_expert, n_workers,
             smgr
@@ -55,7 +53,6 @@ torch::Tensor _global_gather(
         torch::Tensor output_buf,
         torch::Tensor local_expert_count,
         torch::Tensor global_expert_count,
-        torch::Tensor sent_models, 
         torch::Tensor stored_models,
         long batch_size, long n_workers) {
     CHECK_INPUT(output_buf);
@@ -72,7 +69,6 @@ torch::Tensor _global_gather(
             local_expert_count.data_ptr<long>(),
             global_expert_count.data_ptr<long>(),
             local_output_buf.data_ptr<scalar_t>(),
-            sent_models.data_ptr<bool>(),
             stored_models.data_ptr<bool>(),
             out_feat, n_expert, n_workers,
             smgr
@@ -141,7 +137,6 @@ std::vector<torch::Tensor> _exchange_cache_info(
 }
 
 int _model_exchange(
-        torch::Tensor sent_models,
         torch::Tensor stored_models,
         std::vector<torch::Tensor> local_params,
         std::vector<std::vector<torch::Tensor>> params,
@@ -161,7 +156,6 @@ int _model_exchange(
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(local_params[0][0].scalar_type(), 
             "fmoe_cuda_model_exchange", ([&] {
         fmoe_cuda_model_exchange_impl<scalar_t>(
-            sent_models.data_ptr<bool>(),
             stored_models.data_ptr<bool>(),
             local_params,
             params,
@@ -179,13 +173,11 @@ int _model_exchange(
 torch::Tensor _generate_cached_count(
         torch::Tensor local_expert_count,
         torch::Tensor global_expert_count,
-        torch::Tensor sent_models,
         torch::Tensor stored_models,
         long num_expert, long world_size) {
     
     CHECK_INPUT(local_expert_count);
     CHECK_INPUT(global_expert_count);
-    CHECK_INPUT(sent_models);
     CHECK_INPUT(stored_models);
 
     auto smgr = getCudaStreamManager(local_expert_count.device().index());
@@ -193,7 +185,7 @@ torch::Tensor _generate_cached_count(
     NCCL_SAFE_CALL(ncclCommUserRank(smgr->ncclcomm, &rank));
 
     torch::Tensor new_fwd_expert_count = local_expert_count.mul(stored_models);             // values for fetched models
-    torch::Tensor self_counts = global_expert_count.mul(sent_models.logical_not()).sum(0);  // values that will still be received in the local models
+    torch::Tensor self_counts = global_expert_count.mul(stored_models[rank].logical_not()).sum(0);  // values that will still be received in the local models
 
     // Join the information
     new_fwd_expert_count[rank] = new_fwd_expert_count[rank].add(self_counts);
@@ -202,7 +194,6 @@ torch::Tensor _generate_cached_count(
 }
 
 void _gradient_exchange(
-        torch::Tensor sent_models,
         torch::Tensor stored_models,
         std::vector<torch::Tensor> local_grads,
         std::vector<std::vector<torch::Tensor>> grads,
@@ -221,7 +212,6 @@ void _gradient_exchange(
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(local_grads[0].scalar_type(), 
             "fmoe_cuda_gradient_exchange", ([&] {
         fmoe_cuda_gradient_exchange_impl<scalar_t>(
-            sent_models.data_ptr<bool>(),
             stored_models.data_ptr<bool>(),
             local_grads,
             grads,

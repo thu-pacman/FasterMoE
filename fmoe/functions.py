@@ -66,7 +66,7 @@ def prepare_forward(gate, num_expert, world_size, comm=None):
         pos,
         local_expert_count.cpu(),
         global_expert_count.cpu(),
-        all_expert_count,
+        all_expert_count.cpu(),
         fwd_expert_count.cpu()
     )
 
@@ -85,7 +85,7 @@ def _local_gather(inp, pos, out_batch_size, maybe_overlap=True):
         inp_buf.index_copy_(0, pos, inp)
     return inp_buf
 
-def _generate_model_parameters(sent_models, stored_models, experts, fused):
+def _generate_model_parameters(stored_models, experts, fused):
     r"""
     TODO this function assumes all nodes have the same experts
     """
@@ -143,45 +143,42 @@ class MOECache(Function):
         fused, # for optimization
     ):
         if world_size > 1:
-            selection = policy_fn(fwd_expert_count, all_expert_count, local_expert_count, global_expert_count, batch_size, d_model, topk)
+            stored_models = policy_fn(all_expert_count, world_size, d_model)
             
             # sent_models is the information of which models to send and to where according to the previous selection. stored_models will contain the info of where to fetch models from
-            sent_models, stored_models = [x.cpu() for x in fmoe_cuda.exchange_cache_info(selection.cuda(), num_expert, world_size)]
-            local_params, all_params, models = _generate_model_parameters(sent_models, stored_models, experts, fused)
+            # sent_models, stored_models = [x.cpu() for x in fmoe_cuda.exchange_cache_info(selection.cuda(), num_expert, world_size)]
+            local_params, all_params, models = _generate_model_parameters(stored_models, experts, fused)
             
             if not fused:
-                fmoe_cuda.model_exchange(sent_models, stored_models, local_params, all_params, num_expert, world_size, fused)
+                fmoe_cuda.model_exchange(stored_models, local_params, all_params, num_expert, world_size, fused)
             else:
-                sent_models = sent_models.any()
                 stored_models =  stored_models.any(dim=1)
                 
                 # TODO should we extract this value?
-                i = fmoe_cuda.model_exchange(sent_models, stored_models, local_params, all_params, 1, world_size)
+                i = fmoe_cuda.model_exchange(stored_models, local_params, all_params, 1, world_size)
                 
                 # add self node's experts to the list without copying
                 models[i] = [experts]
 
                 # Because we are fusing, all other experts will be sent together
-                sent_models = sent_models.repeat(num_expert)
                 stored_models = stored_models.view(world_size, 1).repeat(1, num_expert)
             
             _update_fetched_model_params(models, all_params)
 
             # now we need to include information about all the local experts that will run
             # num_expert * world_size tensor
-            fwd_expert_count = fmoe_cuda.generate_cached_count(local_expert_count.cuda(), global_expert_count.cuda(), sent_models.cuda(), stored_models.cuda(), num_expert, world_size).cpu()
-            
+            fwd_expert_count = fmoe_cuda.generate_cached_count(local_expert_count.cuda(), global_expert_count.cuda(), stored_models.cuda(), num_expert, world_size).cpu()
         else:
             raise NotImplementedError
 
-        variables = (sent_models, stored_models)
+        variables = (stored_models,)
         ctx.save_for_backward(*variables)
         ctx.models = models, i, fused, num_expert, world_size
-        return inp, models, sent_models, stored_models, fwd_expert_count, int(fwd_expert_count.sum().item())
+        return inp, models, stored_models, fwd_expert_count, int(fwd_expert_count.sum().item())
 
     @staticmethod
-    def backward(ctx, inp, models, sent_models, stored_models, fwd_expert_count, fwd_batch_size):
-        sent_models, stored_models = ctx.saved_tensors
+    def backward(ctx, inp, models, stored_models, fwd_expert_count, fwd_batch_size):
+        stored_models, = ctx.saved_tensors
         models, i, fused, num_expert, world_size = ctx.models
         local_experts = models[i]
         models[i] = [] # remove self from list
@@ -190,11 +187,10 @@ class MOECache(Function):
         local_gradients = [_flatten_dense_tensors([x.grad if torch.is_tensor(x.grad) else torch.zeros(x.shape).cuda() for x in m.parameters()]) for m in local_experts]
 
         if fused:
-            sent_models = sent_models.any()
             stored_models = stored_models.any(dim=1)
             num_expert = 1
 
-        fmoe_cuda.gradient_exchange(sent_models, stored_models, local_gradients, gradients, num_expert, world_size)
+        fmoe_cuda.gradient_exchange(stored_models, local_gradients, gradients, num_expert, world_size)
 
         _update_local_model_params(local_experts, local_gradients)
 
@@ -214,7 +210,6 @@ class MOEScatter(Function):
         pos,
         local_expert_count,
         global_expert_count,
-        sent_models,
         stored_models,
         fwd_batch_size,
         world_size,
@@ -225,7 +220,6 @@ class MOEScatter(Function):
                 local_input_buf,
                 local_expert_count,
                 global_expert_count,
-                sent_models,
                 stored_models,
                 fwd_batch_size,
                 world_size,
@@ -233,13 +227,13 @@ class MOEScatter(Function):
         else:
             global_input_buf = local_input_buf
         ctx.moe_args = inp.shape[0], pos.shape[0], world_size
-        variables = (pos, local_expert_count, global_expert_count, sent_models, stored_models)
+        variables = (pos, local_expert_count, global_expert_count, stored_models)
         ctx.save_for_backward(*variables)
         return global_input_buf
 
     @staticmethod
     def backward(ctx, global_grad_in):
-        (pos, local_expert_count, global_expert_count, sent_models, stored_models) = ctx.saved_tensors
+        (pos, local_expert_count, global_expert_count, stored_models) = ctx.saved_tensors
         (inp_batch_size, buf_batch_size, world_size) = ctx.moe_args
 
         if world_size > 1:
@@ -247,7 +241,6 @@ class MOEScatter(Function):
                 global_grad_in,
                 local_expert_count,
                 global_expert_count,
-                sent_models,
                 stored_models,
                 buf_batch_size,
                 world_size,
@@ -298,7 +291,6 @@ class MOEGather(Function):
         pos,
         local_expert_count,
         global_expert_count,
-        sent_models,
         stored_models,
         local_batch_size,
         world_size,
@@ -308,7 +300,6 @@ class MOEGather(Function):
                 global_output_buf,
                 local_expert_count,
                 global_expert_count,
-                sent_models,
                 stored_models,
                 pos.shape[0],
                 world_size,
@@ -319,13 +310,13 @@ class MOEGather(Function):
                 maybe_overlap=False)
 
         ctx.moe_args = (global_output_buf.shape[0], world_size)
-        variables = (pos, local_expert_count, global_expert_count, sent_models, stored_models)
+        variables = (pos, local_expert_count, global_expert_count, stored_models)
         ctx.save_for_backward(*variables)
         return output
 
     @staticmethod
     def backward(ctx, grad_out):
-        pos, local_expert_count, global_expert_count, sent_models, stored_models = ctx.saved_tensors
+        pos, local_expert_count, global_expert_count, stored_models = ctx.saved_tensors
         fwd_batch_size, world_size = ctx.moe_args
         grad_out_buf = _local_scatter(grad_out.contiguous(), pos)
         if world_size > 1:
@@ -333,7 +324,6 @@ class MOEGather(Function):
                 grad_out_buf,
                 local_expert_count,
                 global_expert_count,
-                sent_models,
                 stored_models,
                 fwd_batch_size,
                 world_size,

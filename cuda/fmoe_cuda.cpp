@@ -12,22 +12,20 @@ torch::Tensor _global_scatter(
         torch::Tensor input_buf,
         torch::Tensor local_expert_count,
         torch::Tensor global_expert_count,
-        torch::Tensor sent_models, 
         torch::Tensor stored_models,
         long batch_size, long n_workers);
 torch::Tensor _global_gather(
         torch::Tensor output_buf,
         torch::Tensor local_expert_count,
         torch::Tensor global_expert_count,
-        torch::Tensor sent_models, 
         torch::Tensor stored_models,
         long batch_size, long n_workers);
+//TODO remove this function
 std::vector<torch::Tensor> _exchange_cache_info(
         torch::Tensor sent_models,
         long num_expert,
         long world_size);
 int _model_exchange(
-        torch::Tensor sent_models,
         torch::Tensor stored_models,
         std::vector<torch::Tensor> local_params,
         std::vector<std::vector<torch::Tensor>> params,
@@ -35,11 +33,9 @@ int _model_exchange(
 torch::Tensor _generate_cached_count(
         torch::Tensor local_expert_count,
         torch::Tensor global_expert_count,
-        torch::Tensor sent_models,
         torch::Tensor stored_models,
         long num_expert, long world_size);
 void _gradient_exchange(
-        torch::Tensor sent_models,
         torch::Tensor stored_models,
         std::vector<torch::Tensor> local_grads,
         std::vector<std::vector<torch::Tensor>> grads,
