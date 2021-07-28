@@ -84,9 +84,12 @@ def patch_forward_step(forward_step_func):
     if not get_args().balance_strategy:
         return forward_step_func
 
-    def forward_step_with_balance_loss(data_iterator, model, input_tensor):
+    def forward_step_with_balance_loss(data_iterator, model, input_tensor='not given'):
         args = get_args()
-        output = forward_step_func(data_iterator, model, input_tensor)
+        if input_tensor == 'not given':
+            output = forward_step_func(data_iterator, model)
+        else:
+            output = forward_step_func(data_iterator, model, input_tensor)
 
         if not is_pipeline_last_stage() or not args.balance_strategy or args.balance_strategy == 'naive':
             return output

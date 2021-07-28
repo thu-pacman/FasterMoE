@@ -8,6 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from fmoe.transformer import FMoETransformerMLP
+from fmoe.utils import get_torch_default_comm
 from .balance import reset_gate_hook
 from .balance import generate_megatron_gate_hook
 from .distributed import set_moe_group
@@ -87,20 +88,19 @@ class MegatronMLP(FMoETransformerMLP):
         gate = None
         if not args.balance_strategy or args.balance_strategy == "naive":
             from fmoe.gates import NaiveGate
-
             gate = NaiveGate
         elif args.balance_strategy == "noisy":
             from fmoe.gates import NoisyGate
-
             gate = NoisyGate
         elif args.balance_strategy == "gshard":
             from fmoe.gates import GShardGate
-
             gate = GShardGate
         elif args.balance_strategy == "switch":
             from fmoe.gates import SwitchGate
-
             gate = SwitchGate
+        elif args.balance_strategy == "neighbor":
+            from fmoe.gates import gen_neighbor_gate
+            gate = gen_neighbor_gate(moe_group.rank())
         else:
             assert False, "Undefined balance strategy {}" % (args.balance_strategy)
 
@@ -196,7 +196,7 @@ def fmoefy(
         # For compatibility to older versions of Megatron-LM
         mp_group = mpu.get_model_parallel_group()
     if args.pipeline_model_parallel_size == 1:
-        moe_group = None
+        moe_group = get_torch_default_comm()
     else:
         # Create a comm prependicular to pipeline group
         stage_size = args.world_size // args.pipeline_model_parallel_size
