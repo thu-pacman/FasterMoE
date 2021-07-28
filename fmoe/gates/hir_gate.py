@@ -2,13 +2,17 @@ from .naive_gate import NaiveGate
 
 import torch
 import torch.nn.functional as F
+from .utils import limit_by_capacity
+
+
+nw_per_node = 8
 
 
 class HirGate(NaiveGate):
     def __init__(self, d_model, n_expert, world_size, node_rank):
         super().__init__(d_model, n_expert, world_size, top_k=2)
-        self.ne_per_node = 8 * n_expert
-        self.ogn_ratio = .22
+        self.ne_per_node = nw_per_node * n_expert
+        self.ogn_ratio = .12
         self.node_rank = node_rank
 
         mask = [0] * world_size * n_expert
@@ -31,7 +35,6 @@ class HirGate(NaiveGate):
         if ogn_mask.sum().item() < ogn_thres:
             topk_val, topk_idx = torch.topk(gate_score, k=self.top_k)
             topk_val = F.softmax(topk_val, dim=-1)
-            return topk_idx, topk_val
 
         with torch.no_grad():
             _, top_ogn = torch.topk(top1_val.view(-1), k=ogn_thres)
@@ -43,6 +46,10 @@ class HirGate(NaiveGate):
         idx_x = torch.arange(inp.shape[0], device=inp.device).repeat_interleave(2)
         topk_val = gate_score[idx_x, topk_idx.view(-1)].view(-1, self.top_k)
 
+        capacity = int(1.2 * inp.shape[0] * self.top_k)
+        _new_lec, _new_gec, topk_idx = limit_by_capacity(
+                topk_idx, self.num_expert, self.world_size, capacity)
+
         topk_val = F.softmax(topk_val, dim=-1)
         return topk_idx, topk_val
 
@@ -50,5 +57,5 @@ class HirGate(NaiveGate):
 def gen_hir_gate(rank):
     def _gen(d_model, n_expert, world_size, top_k=2):
         assert top_k == 2
-        return HirGate(d_model, n_expert, world_size, rank)
+        return HirGate(d_model, n_expert, world_size, rank // nw_per_node)
     return _gen
