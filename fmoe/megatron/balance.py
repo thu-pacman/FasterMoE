@@ -73,6 +73,11 @@ def add_balance_log(model, writer, iteration):
             )
 
 
+noloss_strategies = set([
+    'naive', 'neighbor'
+])
+
+
 def patch_forward_step(forward_step_func):
     r"""
     Patch model's forward_step_func to support balance loss
@@ -91,7 +96,7 @@ def patch_forward_step(forward_step_func):
         else:
             output = forward_step_func(data_iterator, model, input_tensor)
 
-        if not is_pipeline_last_stage() or not args.balance_strategy or args.balance_strategy == 'naive':
+        if not is_pipeline_last_stage() or not args.balance_strategy or args.balance_strategy in noloss_strategies:
             return output
         loss_name = args.balance_strategy + "_loss"
 

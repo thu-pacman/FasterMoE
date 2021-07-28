@@ -7,5 +7,3 @@ from .noisy_gate import NoisyGate
 
 from .gshard_gate import GShardGate
 from .switch_gate import SwitchGate
-
-from .neighbor_gate import NeighborGate

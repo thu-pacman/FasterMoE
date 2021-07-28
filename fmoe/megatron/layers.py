@@ -99,7 +99,7 @@ class MegatronMLP(FMoETransformerMLP):
             from fmoe.gates import SwitchGate
             gate = SwitchGate
         elif args.balance_strategy == "neighbor":
-            from fmoe.gates import gen_neighbor_gate
+            from fmoe.gates.neighbor_gate import gen_neighbor_gate
             gate = gen_neighbor_gate(moe_group.rank())
         else:
             assert False, "Undefined balance strategy {}" % (args.balance_strategy)
