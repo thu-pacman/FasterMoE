@@ -127,40 +127,44 @@ def _fmoe_general_global_forward(inp, gate, expert_fn, policy_fn, experts, num_e
     )
     return x
 
-def _default_policy(all_expert_count, all_global_expert_count, num_expert, world_size, d_model, fused):                         
+def _default_policy(all_experts_count, all_global_expert_count, num_expert, world_size, d_model, fused):
     bw_pcie = 88 * 1e9 / 8                     
     bw_net = 50 * 1e9 / 8                                      
     bw_mm = 11.5e12
-    # print(all_expert_count)
-    fwd_expert_counts = all_expert_count.sum(0)
+    
+    if fused:
+        all_experts_count = all_experts_count.sum(dim=-1).view(world_size, world_size, 1)
+        all_global_expert_count = all_global_expert_count.sum(dim=-1).view(world_size, world_size, 1)
+
+    fwd_expert_counts = all_global_expert_count.sum(1) # [world_size, num_expert]
     default_counts = fwd_expert_counts.clone()
     
     _, indices = fwd_expert_counts.sort(0, descending=True)
-    global_expert_counts = torch.tensor([[y[i] for y in all_expert_count] for i,_ in enumerate(all_expert_count)])
     
     alphaHsquared = d_model * (d_model**2) * 4**2
     
-    slowest = default_counts.max(0)[0]
-    lat_comp = 12 * slowest * alphaHsquared / bw_mm  + 4 * slowest * d_model * 4 / bw_net
+    B_w = default_counts.max(0)[0]
+    lat_comp = 12 * B_w * alphaHsquared / bw_mm  + 4 * B_w * d_model * 4 / bw_net
     
-    prev = float('+inf')
-    model_size = 4 * alphaHsquared / bw_net
+    comm = float('+inf')
+    model_size = 2 * alphaHsquared * num_expert / bw_net * (1 + 2 * (world_size - 1) / world_size)
     comp_time = 12 * alphaHsquared / bw_mm
     
     for i, index in enumerate(indices):
-        fwd_expert_counts[index] -= global_expert_counts[index].sum()
-        fwd_expert_counts += global_expert_counts[index].view(world_size, -1)
+        fwd_expert_counts[index] = 0
+        fwd_expert_counts += all_global_expert_count[index].view(world_size, -1)
         
-        lat_comm = fwd_expert_counts.max(0)[0] * comp_time + i * model_size
+        B_k = fwd_expert_counts.max(0)[0]
+        lat_comm = fwd_expert_counts.max(0)[0] * comp_time + (i+1) * model_size
         
-        if lat_comm < prev:
-            prev = lat_comm
-        elif lat_comm > prev:
-            # print('stopped at', i)
+        if lat_comm < comm:
+            comm = lat_comm
+        elif lat_comm > comm:
             break
     
-    res = torch.zeros(all_expert_count[0].shape, dtype=bool)
-    if lat_comp > prev:
+    res = all_experts_count.new_zeros(world_size, num_expert, dtype=bool)
+
+    if lat_comp > comm:
         res[indices[:i]] = True
     
     return res
