@@ -37,7 +37,7 @@ if __name__ == '__main__':
                     'cuda/stream_manager.cpp',
                     'cuda/local_exchange.cu',
                     'cuda/balancing.cu',
-                    'cuda/global_exchange.cpp',
+                    'cuda/global_exchange.cu',
                     'cuda/parallel_linear.cu',
                     'cuda/fmoe_cuda.cpp',
                     ],

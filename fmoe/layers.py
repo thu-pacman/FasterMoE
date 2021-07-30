@@ -91,6 +91,7 @@ def _fmoe_general_global_forward(inp, gate, expert_fn, policy_fn, experts, num_e
         local_expert_count,
         global_expert_count,
         all_expert_count,
+        all_global_expert_count,
         fwd_expert_count,
     ) = prepare_forward(gate, num_expert, world_size)
     topk = 1
@@ -100,6 +101,7 @@ def _fmoe_general_global_forward(inp, gate, expert_fn, policy_fn, experts, num_e
     inp, models, stored_models, fwd_expert_count, fwd_batch_size = MOECache.apply(
         inp,
         all_expert_count.view(world_size, world_size, num_expert),
+        all_global_expert_count.view(world_size, world_size, num_expert),
         local_expert_count.view(world_size, num_expert), 
         global_expert_count.view(world_size, num_expert), 
         fwd_expert_count, policy_fn, experts,
@@ -125,16 +127,16 @@ def _fmoe_general_global_forward(inp, gate, expert_fn, policy_fn, experts, num_e
     )
     return x
 
-def _default_policy(all_experts_count, world_size, d_model):                         
+def _default_policy(all_expert_count, all_global_expert_count, num_expert, world_size, d_model, fused):                         
     bw_pcie = 88 * 1e9 / 8                     
     bw_net = 50 * 1e9 / 8                                      
     bw_mm = 11.5e12
-    # print(all_experts_count)
-    fwd_expert_counts = all_experts_count.sum(0)
+    # print(all_expert_count)
+    fwd_expert_counts = all_expert_count.sum(0)
     default_counts = fwd_expert_counts.clone()
     
     _, indices = fwd_expert_counts.sort(0, descending=True)
-    global_expert_counts = torch.tensor([[y[i] for y in all_experts_count] for i,_ in enumerate(all_experts_count)])
+    global_expert_counts = torch.tensor([[y[i] for y in all_expert_count] for i,_ in enumerate(all_expert_count)])
     
     alphaHsquared = d_model * (d_model**2) * 4**2
     
@@ -157,7 +159,7 @@ def _default_policy(all_experts_count, world_size, d_model):
             # print('stopped at', i)
             break
     
-    res = torch.zeros(all_experts_count[0].shape, dtype=bool)
+    res = torch.zeros(all_expert_count[0].shape, dtype=bool)
     if lat_comp > prev:
         res[indices[:i]] = True
     

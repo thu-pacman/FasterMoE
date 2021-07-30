@@ -3,10 +3,26 @@
 #include <vector>
 #include <torch/extension.h>
 
+
+// given an all expert counts array with shape [world_size, world_size, num_experts], populates the equivalente global_expert_count as if done via all-to-all
+__global__
+void generate_global_counts(const long * all_expert_count, long * all_global_count, int n_expert, int world_size) {
+    int worker_idx = blockIdx.x; // what worker am I
+    int tid = threadIdx.x; // what position am i handling
+
+    int offset = tid / n_expert; // what line should be written
+    int pos = tid % n_expert; // the position in the line
+    
+    if (tid < n_expert * world_size) {
+        all_global_count[worker_idx * world_size * n_expert + tid] = all_expert_count[offset * world_size * n_expert + worker_idx * n_expert + pos];
+    }
+}
+
 void fmoe_cuda_expert_exchange_impl(
         const long* local_expert_count, 
         long* global_expert_count, 
         long * all_expert_count,
+        long * all_global_expert_count,
         int n_expert, int world_size,
         CudaStreamManager* smgr) {
     
@@ -21,17 +37,24 @@ void fmoe_cuda_expert_exchange_impl(
         smgr->ncclcomm,
         smgr->stream(0)));
 
-    // TODO implement dedicated kernel
-    for (size_t i = 0; i < world_size; i++) {
-        checkCudaErrors(cudaMemcpyAsync(
-            global_expert_count + i * n_expert,
-            all_expert_count + i * world_size * n_expert + rank * n_expert,
-            n_expert * sizeof(long),
-            cudaMemcpyDeviceToDevice,
-            smgr->stream(0)));
-    }
+    dim3 grid_dim(world_size);
+    dim3 block_dim(1024);
+    generate_global_counts<<<grid_dim, block_dim, 0, smgr->stream(0)>>>(
+        all_expert_count,
+        all_global_expert_count,
+        n_expert, 
+        world_size
+    );
+
+    checkCudaErrors(cudaMemcpyAsync(
+        global_expert_count,
+        all_global_expert_count + rank * world_size * n_expert,
+        world_size * n_expert * sizeof(long),
+        cudaMemcpyDeviceToDevice,
+        smgr->stream(0)));
 
     smgr->sync(1);
+    checkCudaErrors(cudaGetLastError());
 }
 
 template<typename scalar_t>
@@ -223,7 +246,6 @@ void fmoe_cuda_gradient_exchange_impl(
 
     int rank;
     NCCL_SAFE_CALL(ncclCommUserRank(smgr->ncclcomm, &rank));
-    size_t amount_sent = 0, amount_received = 0;
 
     // send back broadcasted data
     for (size_t i = 0; i < num_expert; i++) {

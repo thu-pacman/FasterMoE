@@ -27,12 +27,13 @@ def count_by_gate(gate, num_expert, world_size, require_pos=True):
 
         if world_size > 1:
             _ensure_nccl(gate)
-            all_expert_count, global_expert_count = fmoe_cuda.expert_exchange(
+            all_expert_count, all_global_expert_count, global_expert_count = fmoe_cuda.expert_exchange(
                 local_expert_count, num_expert, world_size
             )
         else:
             global_expert_count = local_expert_count
-            all_expert_count = local_expert_count.view(1, *local_expert_count.shape)
+            all_expert_count = local_expert_count
+            all_global_expert_count = global_expert_count
         if not require_pos:
             pos = None
         else:
@@ -40,7 +41,7 @@ def count_by_gate(gate, num_expert, world_size, require_pos=True):
             pos_size = lec_cum[-1].item()
             pos = torch.empty((pos_size,), device=gate.device, dtype=torch.long)
             fmoe_cuda.assign_pos(lec_cum, gate, pos)
-    return pos, local_expert_count, global_expert_count, all_expert_count
+    return pos, local_expert_count, all_expert_count, global_expert_count, all_global_expert_count
 
 
 def prepare_forward(gate, num_expert, world_size, comm=None):
@@ -57,7 +58,7 @@ def prepare_forward(gate, num_expert, world_size, comm=None):
     if world_size > 1:
         _ensure_nccl(gate, comm=comm)
 
-    pos, local_expert_count, global_expert_count, all_expert_count = count_by_gate(gate, 
+    pos, local_expert_count, all_expert_count, global_expert_count, all_global_expert_count = count_by_gate(gate, 
             num_expert, world_size)
     with torch.no_grad():
         fwd_expert_count = global_expert_count.view(world_size,
@@ -67,6 +68,7 @@ def prepare_forward(gate, num_expert, world_size, comm=None):
         local_expert_count.cpu(),
         global_expert_count.cpu(),
         all_expert_count.cpu(),
+        all_global_expert_count.cpu(),
         fwd_expert_count.cpu()
     )
 
@@ -130,6 +132,7 @@ class MOECache(Function):
         ctx,
         inp,
         all_expert_count,
+        all_global_expert_count,
         local_expert_count,
         global_expert_count,
         fwd_expert_count,
@@ -143,10 +146,9 @@ class MOECache(Function):
         fused, # for optimization
     ):
         if world_size > 1:
-            stored_models = policy_fn(all_expert_count, world_size, d_model)
+            stored_models = policy_fn(all_expert_count, all_global_expert_count, num_expert, world_size, d_model, fused)
             
             # sent_models is the information of which models to send and to where according to the previous selection. stored_models will contain the info of where to fetch models from
-            # sent_models, stored_models = [x.cpu() for x in fmoe_cuda.exchange_cache_info(selection.cuda(), num_expert, world_size)]
             local_params, all_params, models = _generate_model_parameters(stored_models, experts, fused)
             
             if not fused:
@@ -154,7 +156,6 @@ class MOECache(Function):
             else:
                 stored_models =  stored_models.any(dim=1)
                 
-                # TODO should we extract this value?
                 i = fmoe_cuda.model_exchange(stored_models, local_params, all_params, 1, world_size)
                 
                 # add self node's experts to the list without copying
@@ -194,7 +195,7 @@ class MOECache(Function):
 
         _update_local_model_params(local_experts, local_gradients)
 
-        return inp, None, None, None, None, None, None, None, None, None, None, None, None
+        return inp, None, None, None, None, None, None, None, None, None, None, None, None, None
 
 class MOEScatter(Function):
     r"""
