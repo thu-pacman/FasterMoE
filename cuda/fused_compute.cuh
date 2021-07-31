@@ -178,30 +178,26 @@ void fmoe_cuda_fused_forward_impl(
         cudaEventRecord(input_ready[step], smgr->stream(0));
     }
 
-    long compute_step = 0;
-
-    std::thread th([&]() {
-        for (long step = 0; step < n_groups; compute_step = ++step) {
-            cudaEventSynchronize(input_ready[step]);
-            for (int ei = 0; ei < num_expert; ++ei) {
-                GEN_BASE(step);
-                long offset = global_ptr[from_base * num_expert];
-                long micro_batch_size = global_ptr[(from_base + pipeline_gran) * num_expert] - offset;
-                _compute_mlp_forward(
-                        global_input_buf, weight1, weight2,
-                        middle_buf, global_output_buf,
-                        has_bias,
-                        ei,
-                        offset, micro_batch_size,
-                        d_model, d_hidden,
-                        smgr->stream(1), smgr->handle(1));
-            }
-            cudaEventRecord(output_ready[step], smgr->stream(1));
+    for (long step = 0; step < n_groups; ++step) {
+        cudaStreamWaitEvent(smgr->stream(1), input_ready[step], 0);
+        for (int ei = 0; ei < num_expert; ++ei) {
+            GEN_BASE(step);
+            long offset = global_ptr[from_base * num_expert];
+            long micro_batch_size = global_ptr[(from_base + pipeline_gran) * num_expert] - offset;
+            _compute_mlp_forward(
+                    global_input_buf, weight1, weight2,
+                    middle_buf, global_output_buf,
+                    has_bias,
+                    ei,
+                    offset, micro_batch_size,
+                    d_model, d_hidden,
+                    smgr->stream(1), smgr->handle(1));
         }
-    });
+        cudaEventRecord(output_ready[step], smgr->stream(1));
+    }
 
     for (long step = 0; step < n_groups; ++step) {
-        while (step >= compute_step);
+        cudaStreamWaitEvent(smgr->stream(0), output_ready[step], 0);
         for (int ei = 0; ei < num_expert; ++ei) {
             GEN_BASE(step);
             NCCL_SAFE_CALL(ncclGroupStart());
@@ -221,10 +217,13 @@ void fmoe_cuda_fused_forward_impl(
 
     delete [] local_ptr;
     delete [] global_ptr;
+    smgr->sync(0);
+    for (long i = 0; i < n_groups; ++i) {
+        cudaEventDestroy(input_ready[i]);
+        cudaEventDestroy(output_ready[i]);
+    }
     delete [] input_ready;
     delete [] output_ready;
-    th.join();
-    smgr->sync(0);
 }
 
 #endif  // FUSED_COMPUTE_H
