@@ -4,10 +4,12 @@ Layers that FMoE provides to users
 import torch
 import torch.nn as nn
 import math
+import os
 
 from .functions import prepare_forward, ensure_comm
 from .functions import MOEScatter, MOEGather, MOELinear
 from .functions import AllGather, Slice
+from .fused_functions import MOEForward
 from .gates import NaiveGate
 
 
@@ -74,7 +76,8 @@ def mark_module_parallel_comm(module, comm):
         setattr(p, "dp_comm", comm)
 
 
-def _fmoe_general_global_forward(inp, gate, expert_fn, num_expert, world_size):
+def _fmoe_general_global_forward(inp, gate, expert_fn, num_expert, world_size,
+        enable_fuse=False):
     r"""
     A private function that performs the following steps to complete the MoE
     computation.
@@ -93,18 +96,28 @@ def _fmoe_general_global_forward(inp, gate, expert_fn, num_expert, world_size):
         fwd_expert_count,
         fwd_batch_size,
     ) = prepare_forward(gate, num_expert, world_size)
+
     topk = 1
     if len(gate.shape) == 2:
         topk = gate.shape[1]
+
+    out_batch_size = inp.shape[0]
+    if len(gate.shape) == 2:
+        out_batch_size *= gate.shape[1]
+
+    if enable_fuse:
+        x = MOEForward.apply(
+                inp, expert_fn.htoh4.weight, expert_fn.h4toh.weight,
+                pos // topk, pos,
+                local_expert_count, global_expert_count,
+                fwd_batch_size, out_batch_size, world_size)
+        return x
+
     x = MOEScatter.apply(
         inp, pos // topk,
         local_expert_count, global_expert_count, fwd_batch_size, world_size
     )
     x = expert_fn(x, fwd_expert_count)
-
-    out_batch_size = inp.shape[0]
-    if len(gate.shape) == 2:
-        out_batch_size *= gate.shape[1]
 
     x = MOEGather.apply(
         x, pos,
@@ -145,6 +158,7 @@ class FMoE(nn.Module):
         gate_hook=None,
         mask=None,
         mask_dict=None,
+        enable_fuse=False
     ):
         super().__init__()
         self.num_expert = num_expert
@@ -173,6 +187,13 @@ class FMoE(nn.Module):
         self.mask = mask
         self.mask_dict = mask_dict
         self.moe_group = moe_group
+
+        if os.environ.get('FMOE_ENABLE_FUSE', '0') == '1':
+            enable_fuse = True
+        self.enable_fuse = enable_fuse
+        if enable_fuse:
+            assert(self.experts_fused)
+            self.expert_fn = self.experts
 
     def expert_fn(self, inp, fwd_expert_count):
         r"""
@@ -230,7 +251,7 @@ class FMoE(nn.Module):
 
         fwd = _fmoe_general_global_forward(
             inp, gate_top_k_idx,
-            self.expert_fn, self.num_expert, self.world_size
+            self.expert_fn, self.num_expert, self.world_size, self.enable_fuse
         )
 
         # recover deleted tensors
