@@ -53,12 +53,24 @@ torch::Tensor _prune_gate_by_capacity(
         torch::Tensor gate_idx, torch::Tensor expert_count,
         long n_expert, long n_worker);
 
+// fused functions
+std::vector<torch::Tensor> _fused_forward(
+        torch::Tensor input_buf,
+        torch::Tensor weight1,
+        torch::Tensor weight2,
+        torch::Tensor local_expert_count,
+        torch::Tensor global_expert_count,
+        long global_batch_size,
+        long n_workers, bool has_bias);
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 #ifdef FMOE_USE_NCCL
     m.def("expert_exchange", &_expert_exchange, "FastMoE expert exchange (CUDA)");
     m.def("global_scatter", &_global_scatter, "FastMoE global scatter (CUDA)");
     m.def("global_gather", &_global_gather, "FastMoE global gather (CUDA)");
     m.def("ensure_nccl", &_ensure_nccl, "FastMoE ensure torch nccl comm");
+
+    m.def("fused_forward", &_fused_forward, "FastMoE fuse global exchange and linear forward");
 #endif
 
     m.def("expert_count", &_expert_count, "FastMoE count gate indices (CUDA)");
