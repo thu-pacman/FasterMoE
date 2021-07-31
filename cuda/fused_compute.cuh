@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <iostream>
 #include <vector>
+#include <thread>
 
 
 #include <cuda.h>
@@ -115,9 +116,9 @@ void _exchange_with(
 }
 
 
-#define GEN_BASE \
-    long to_base = (group_rank + step) % n_groups * pipeline_gran; \
-    long from_base = (group_rank + n_groups - step) % n_groups * pipeline_gran;
+#define GEN_BASE(_step) \
+    long to_base = (group_rank + _step) % n_groups * pipeline_gran; \
+    long from_base = (group_rank + n_groups - _step) % n_groups * pipeline_gran;
 #define GEN_IDX \
     int idx_send = ei + rank_send * num_expert; \
     int idx_recv = ei + rank_recv * num_expert;
@@ -160,7 +161,7 @@ void fmoe_cuda_fused_forward_impl(
 
     for (long step = 0; step < n_groups; ++step) {
         for (int ei = 0; ei < num_expert; ++ei) {
-            GEN_BASE;
+            GEN_BASE(step);
             NCCL_SAFE_CALL(ncclGroupStart());
             for (int j = 0; j < pipeline_gran; ++j) {
                 int rank_send = j + to_base;
@@ -174,27 +175,35 @@ void fmoe_cuda_fused_forward_impl(
             }
             NCCL_SAFE_CALL(ncclGroupEnd());
         }
+        cudaEventRecord(input_ready[step], smgr->stream(0));
     }
 
-    for (long step = 0; step < n_groups; ++step) {
-        for (int ei = 0; ei < num_expert; ++ei) {
-            GEN_BASE;
-            long offset = global_ptr[from_base * num_expert];
-            long micro_batch_size = global_ptr[(from_base + pipeline_gran) * num_expert] - offset;
-            _compute_mlp_forward(
-                    global_input_buf, weight1, weight2,
-                    middle_buf, global_output_buf,
-                    has_bias,
-                    ei,
-                    offset, micro_batch_size,
-                    d_model, d_hidden,
-                    smgr->stream(0), smgr->handle(0));
+    long compute_step = 0;
+
+    std::thread th([&]() {
+        for (long step = 0; step < n_groups; compute_step = ++step) {
+            cudaEventSynchronize(input_ready[step]);
+            for (int ei = 0; ei < num_expert; ++ei) {
+                GEN_BASE(step);
+                long offset = global_ptr[from_base * num_expert];
+                long micro_batch_size = global_ptr[(from_base + pipeline_gran) * num_expert] - offset;
+                _compute_mlp_forward(
+                        global_input_buf, weight1, weight2,
+                        middle_buf, global_output_buf,
+                        has_bias,
+                        ei,
+                        offset, micro_batch_size,
+                        d_model, d_hidden,
+                        smgr->stream(1), smgr->handle(1));
+            }
+            cudaEventRecord(output_ready[step], smgr->stream(1));
         }
-    }
+    });
 
     for (long step = 0; step < n_groups; ++step) {
+        while (step >= compute_step);
         for (int ei = 0; ei < num_expert; ++ei) {
-            GEN_BASE;
+            GEN_BASE(step);
             NCCL_SAFE_CALL(ncclGroupStart());
             for (int j = 0; j < pipeline_gran; ++j) {
                 int rank_send = j + from_base;
@@ -209,10 +218,12 @@ void fmoe_cuda_fused_forward_impl(
             NCCL_SAFE_CALL(ncclGroupEnd());
         }
     }
+
     delete [] local_ptr;
     delete [] global_ptr;
     delete [] input_ready;
     delete [] output_ready;
+    th.join();
     smgr->sync(0);
 }
 
