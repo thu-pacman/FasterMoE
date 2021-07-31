@@ -70,6 +70,7 @@ std::vector<torch::Tensor> _fused_backward(
         torch::Tensor local_expert_count,
         torch::Tensor global_expert_count,
         long global_batch_size,
+        long buf_batch_size,
         long n_workers, bool has_bias) {
     const auto num_expert = local_expert_count.size(0) / n_workers;
     const auto d_hidden = weight1.size(1);
@@ -81,7 +82,7 @@ std::vector<torch::Tensor> _fused_backward(
     auto grad_middle = input_buf.new_empty({global_batch_size, d_hidden});
     auto global_grad_in = input_buf.new_empty({global_batch_size, d_model});
 
-    auto grad_in = input_buf.new_empty({input_buf.size(0), d_model});
+    auto grad_in = input_buf.new_empty({buf_batch_size, d_model});
     auto grad_weight1 = torch::empty_like(weight1);
     auto grad_weight2 = torch::empty_like(weight2);
 

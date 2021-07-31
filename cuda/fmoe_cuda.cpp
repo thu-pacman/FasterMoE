@@ -72,6 +72,7 @@ std::vector<torch::Tensor> _fused_backward(
         torch::Tensor local_expert_count,
         torch::Tensor global_expert_count,
         long global_batch_size,
+        long buf_batch_size,
         long n_workers, bool has_bias);
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {

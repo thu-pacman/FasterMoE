@@ -34,10 +34,9 @@ __global__
 void relu_backward_kernel(const scalar_t* a, scalar_t* grad_o, size_t n) {
     int i = threadIdx.x + blockIdx.x * blockDim.x;
     int stride = blockDim.x * gridDim.x;
-    scalar_t v;
     for (; i < n; i += stride) {
         if (a[i] <= 0) {
-            grad_o[i] = v;
+            grad_o[i] = 0;
         }
     }
 }
@@ -119,7 +118,7 @@ void _compute_mlp_backward(
         bool is_first,
         cudaStream_t stream,
         cublasHandle_t handle) {
-    scalar_t alpha = 1, beta = is_first ? 0 : 1; 
+    scalar_t alpha = 1, beta_weight = is_first ? 0 : 1, beta_feat = 0; 
     if (batch_size == 0) {
         return;
     }
@@ -134,7 +133,7 @@ void _compute_mlp_backward(
             &alpha,
             weight2 + expert_idx * in_feat * out_feat, in_feat,
             grad_out + batch_offset * out_feat, out_feat,
-            &beta,
+            &beta_feat,
             grad_middle + batch_offset * in_feat , in_feat
             ));
 
@@ -147,7 +146,7 @@ void _compute_mlp_backward(
             &alpha,
             middle_buf + batch_offset * in_feat, in_feat,
             grad_out + batch_offset * out_feat, out_feat,
-            &beta,
+            &beta_weight,
             grad_weight2 + expert_idx * in_feat * out_feat, in_feat
             ));
 
@@ -166,7 +165,7 @@ void _compute_mlp_backward(
             &alpha,
             weight1 + expert_idx * in_feat * out_feat, in_feat,
             grad_middle + batch_offset * out_feat, out_feat,
-            &beta,
+            &beta_feat,
             grad_in + batch_offset * in_feat , in_feat
             ));
 
@@ -179,7 +178,7 @@ void _compute_mlp_backward(
             &alpha,
             input_buf + batch_offset * in_feat, in_feat,
             grad_middle + batch_offset * out_feat, out_feat,
-            &beta,
+            &beta_weight,
             grad_weight1 + expert_idx * in_feat * out_feat, in_feat
             ));
 }
