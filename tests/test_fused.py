@@ -3,13 +3,14 @@ import torch.distributed as dist
 import fmoe
 from fmoe.transformer import FMoETransformerMLP
 
-from .test_numerical import _assert_numerical
+from test_numerical import _assert_numerical
 
 
 def test_forward(n_experts, d_model, d_hidden, batch_size, world_size):
     model = FMoETransformerMLP(
-            n_experts, d_model, d_hidden, world_size).cuda()
-    inp = torch.rand(batch_size, d_model)
+            n_experts, d_model, d_hidden, world_size,
+            activation=torch.nn.ReLU(), bias=False).cuda()
+    inp = torch.rand(batch_size, d_model).cuda()
     std = model(inp)
     model.enable_fuse = True
     model.expert_fn = model.experts
@@ -21,7 +22,7 @@ if __name__ == '__main__':
     dist.init_process_group(backend='nccl')
     rank = dist.get_rank()
     world_size = dist.get_world_size()
-    n_experts = 1
+    n_experts = 4
     d_model = 4
     d_hidden = 8
     batch_size = 6

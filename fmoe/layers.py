@@ -193,7 +193,6 @@ class FMoE(nn.Module):
         self.enable_fuse = enable_fuse
         if enable_fuse:
             assert(self.experts_fused)
-            self.expert_fn = self.experts
 
     def expert_fn(self, inp, fwd_expert_count):
         r"""
@@ -249,9 +248,12 @@ class FMoE(nn.Module):
             inp = inp[mask == 0, :]
             gate_top_k_idx = gate_top_k_idx[mask == 0, :]
 
+        expert_fn = self.expert_fn
+        if self.enable_fuse:
+            expert_fn = self.experts
         fwd = _fmoe_general_global_forward(
             inp, gate_top_k_idx,
-            self.expert_fn, self.num_expert, self.world_size, self.enable_fuse
+            expert_fn, self.num_expert, self.world_size, self.enable_fuse
         )
 
         # recover deleted tensors

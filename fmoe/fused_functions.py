@@ -20,7 +20,7 @@ class MOEForward(Function):
             world_size):
         local_input_buf = _local_scatter(inp, pos_s)
         local_output_buf, gib, gmb, gob = fmoe_cuda.fused_forward(
-                inp, weight1, weight2,
+                local_input_buf, weight1, weight2,
                 local_expert_count, global_expert_count, fwd_batch_size,
                 world_size, False)
         out = _local_gather(local_output_buf, pos_g, out_batch_size,

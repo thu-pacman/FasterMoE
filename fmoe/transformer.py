@@ -50,7 +50,7 @@ class FMoETransformerMLP(FMoE):
         top_k=2,
         expert_dp_comm="none",
         gate_hook=None,
-        bias=True
+        bias=True,
         mask=None,
         mask_dict=None,
     ):
