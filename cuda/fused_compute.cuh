@@ -31,18 +31,14 @@ void relu_kernel(scalar_t* a, size_t n) {
 
 template<typename scalar_t>
 __global__ 
-void relu_backward_kernel(scalar_t* a, const scalar_t* grad_o, 
-        scalar_t* grad_i, size_t n) {
+void relu_backward_kernel(const scalar_t* a, scalar_t* grad_o, size_t n) {
     int i = threadIdx.x + blockIdx.x * blockDim.x;
     int stride = blockDim.x * gridDim.x;
     scalar_t v;
     for (; i < n; i += stride) {
         if (a[i] <= 0) {
-            v = 0;
-        } else {
-            v = grad_o[i];
+            grad_o[i] = v;
         }
-        grad_i[i] = v;
     }
 }
 
@@ -95,6 +91,96 @@ void _compute_mlp_forward(
             middle_buf + batch_offset * in_feat, in_feat,
             &beta,
             output_buf + batch_offset * out_feat, out_feat
+            ));
+}
+
+
+template<typename scalar_t>
+void _compute_mlp_backward(
+        const scalar_t* input_buf,
+        const scalar_t* weight1,
+        const scalar_t* weight2,
+        const scalar_t* middle_buf,
+        const scalar_t* output_buf,
+        const scalar_t* grad_out,
+
+        scalar_t* grad_middle,
+        scalar_t* grad_weight1,
+        scalar_t* grad_weight2,
+        scalar_t* grad_in,
+
+        const bool has_bias,
+        const size_t expert_idx,
+        const size_t batch_offset,
+        const size_t batch_size,
+        const size_t d_model,
+        const size_t d_hidden,
+
+        bool is_first,
+        cudaStream_t stream,
+        cublasHandle_t handle) {
+    scalar_t alpha = 1, beta = is_first ? 0 : 1; 
+    if (batch_size == 0) {
+        return;
+    }
+    size_t in_feat, out_feat;
+    in_feat = d_hidden, out_feat = d_model;
+    // Backward input: g_m = w2 @ g_o
+    checkCudaErrors(cublasXgemm(
+            handle,
+            CUBLAS_OP_N,
+            CUBLAS_OP_N,
+            in_feat, batch_size, out_feat,
+            &alpha,
+            weight2 + expert_idx * in_feat * out_feat, in_feat,
+            grad_out + batch_offset * out_feat, out_feat,
+            &beta,
+            grad_middle + batch_offset * in_feat , in_feat
+            ));
+
+    // Backward weight: g_w2 = m @ g_o
+    checkCudaErrors(cublasXgemm(
+            handle,
+            CUBLAS_OP_N,
+            CUBLAS_OP_T,
+            in_feat, out_feat, batch_size,
+            &alpha,
+            middle_buf + batch_offset * in_feat, in_feat,
+            grad_out + batch_offset * out_feat, out_feat,
+            &beta,
+            grad_weight2 + expert_idx * in_feat * out_feat, in_feat
+            ));
+
+    relu_backward_kernel<<<CEIL(batch_size * d_hidden, NTH), NTH, 0, stream>>>
+        (middle_buf + batch_offset * d_hidden,
+         grad_middle + batch_offset * d_hidden,
+         batch_size * d_hidden);
+
+    in_feat = d_model, out_feat = d_hidden;
+    // Backward input: g_i = w1 @ g_m
+    checkCudaErrors(cublasXgemm(
+            handle,
+            CUBLAS_OP_N,
+            CUBLAS_OP_N,
+            in_feat, batch_size, out_feat,
+            &alpha,
+            weight1 + expert_idx * in_feat * out_feat, in_feat,
+            grad_middle + batch_offset * out_feat, out_feat,
+            &beta,
+            grad_in + batch_offset * in_feat , in_feat
+            ));
+
+    // Backward weight: g_w1 = i @ g_m
+    checkCudaErrors(cublasXgemm(
+            handle,
+            CUBLAS_OP_N,
+            CUBLAS_OP_T,
+            in_feat, out_feat, batch_size,
+            &alpha,
+            input_buf + batch_offset * in_feat, in_feat,
+            grad_middle + batch_offset * out_feat, out_feat,
+            &beta,
+            grad_weight1 + expert_idx * in_feat * out_feat, in_feat
             ));
 }
 
@@ -208,6 +294,117 @@ void fmoe_cuda_fused_forward_impl(
                 _exchange_with(global_output_buf + global_ptr[idx_send] * d_model,
                         global_expert_count[idx_send], rank_send,
                         output_buf + local_ptr[idx_recv] * d_model,
+                        local_expert_count[idx_recv], rank_recv,
+                        d_model, smgr->stream(0), smgr->ncclcomm);
+            }
+            NCCL_SAFE_CALL(ncclGroupEnd());
+        }
+    }
+
+    delete [] local_ptr;
+    delete [] global_ptr;
+    smgr->sync(0);
+    for (long i = 0; i < n_groups; ++i) {
+        cudaEventDestroy(input_ready[i]);
+        cudaEventDestroy(output_ready[i]);
+    }
+    delete [] input_ready;
+    delete [] output_ready;
+}
+
+
+template<typename scalar_t>
+void fmoe_cuda_fused_backward_impl(
+        const scalar_t* input_buf,
+        const scalar_t* weight1,
+        const scalar_t* weight2,
+        const scalar_t* middle_buf,
+        const scalar_t* output_buf,
+        const scalar_t* grad_out,
+
+        scalar_t* global_grad_out,
+        scalar_t* global_grad_in,
+
+        scalar_t* grad_middle,
+        scalar_t* grad_weight1,
+        scalar_t* grad_weight2,
+        scalar_t* grad_in,
+
+        const long* local_expert_count, 
+        const long* global_expert_count, 
+        long d_model, long d_hidden, 
+        long num_expert, long rank, long world_size,
+        bool has_bias,
+        long pipeline_gran, CudaStreamManager* smgr) {
+
+    int *local_ptr = new int[num_expert * world_size + 1];
+    int *global_ptr = new int[num_expert * world_size + 1];
+    local_ptr[0] = global_ptr[0] = 0;
+    for (int i = 1; i <= num_expert * world_size; ++i) {
+        local_ptr[i] = local_ptr[i - 1] + local_expert_count[i - 1];
+        global_ptr[i] = global_ptr[i - 1] + global_expert_count[i - 1];
+    }
+
+    long n_groups = world_size / pipeline_gran;
+    long group_rank = rank / pipeline_gran;
+
+    cudaEvent_t *input_ready = new cudaEvent_t[n_groups];
+    cudaEvent_t *output_ready = new cudaEvent_t[n_groups];
+    for (long i = 0; i < n_groups; ++i) {
+        cudaEventCreate(input_ready + i);
+        cudaEventCreate(output_ready + i);
+    }
+
+    for (long step = 0; step < n_groups; ++step) {
+        for (int ei = 0; ei < num_expert; ++ei) {
+            GEN_BASE(step);
+            NCCL_SAFE_CALL(ncclGroupStart());
+            for (int j = 0; j < pipeline_gran; ++j) {
+                int rank_send = j + to_base;
+                int rank_recv = j + from_base;
+                GEN_IDX;
+                _exchange_with(grad_out + local_ptr[idx_send] * d_model,
+                        local_expert_count[idx_send], rank_send,
+                        global_grad_out + global_ptr[idx_recv] * d_model,
+                        global_expert_count[idx_recv], rank_recv,
+                        d_model, smgr->stream(0), smgr->ncclcomm);
+            }
+            NCCL_SAFE_CALL(ncclGroupEnd());
+        }
+        cudaEventRecord(input_ready[step], smgr->stream(0));
+    }
+
+    for (long step = 0; step < n_groups; ++step) {
+        cudaStreamWaitEvent(smgr->stream(1), input_ready[step], 0);
+        for (int ei = 0; ei < num_expert; ++ei) {
+            GEN_BASE(step);
+            long offset = global_ptr[from_base * num_expert];
+            long micro_batch_size = global_ptr[(from_base + pipeline_gran) * num_expert] - offset;
+            _compute_mlp_backward(
+                    input_buf, weight1, weight2,
+                    middle_buf, output_buf, global_grad_out,
+                    grad_middle, grad_weight1, grad_weight2, global_grad_in,
+                    has_bias,
+                    ei,
+                    offset, micro_batch_size,
+                    d_model, d_hidden, step == 0,
+                    smgr->stream(1), smgr->handle(1));
+        }
+        cudaEventRecord(output_ready[step], smgr->stream(1));
+    }
+
+    for (long step = 0; step < n_groups; ++step) {
+        cudaStreamWaitEvent(smgr->stream(0), output_ready[step], 0);
+        for (int ei = 0; ei < num_expert; ++ei) {
+            GEN_BASE(step);
+            NCCL_SAFE_CALL(ncclGroupStart());
+            for (int j = 0; j < pipeline_gran; ++j) {
+                int rank_send = j + from_base;
+                int rank_recv = j + to_base;
+                GEN_IDX;
+                _exchange_with(global_grad_in + global_ptr[idx_send] * d_model,
+                        global_expert_count[idx_send], rank_send,
+                        grad_in + local_ptr[idx_recv] * d_model,
                         local_expert_count[idx_recv], rank_recv,
                         d_model, smgr->stream(0), smgr->ncclcomm);
             }

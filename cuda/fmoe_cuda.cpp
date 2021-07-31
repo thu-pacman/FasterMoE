@@ -62,6 +62,17 @@ std::vector<torch::Tensor> _fused_forward(
         torch::Tensor global_expert_count,
         long global_batch_size,
         long n_workers, bool has_bias);
+std::vector<torch::Tensor> _fused_backward(
+        torch::Tensor input_buf,
+        torch::Tensor weight1,
+        torch::Tensor weight2,
+        torch::Tensor middle_buf,
+        torch::Tensor output_buf,
+        torch::Tensor grad_out,
+        torch::Tensor local_expert_count,
+        torch::Tensor global_expert_count,
+        long global_batch_size,
+        long n_workers, bool has_bias);
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 #ifdef FMOE_USE_NCCL
@@ -71,6 +82,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("ensure_nccl", &_ensure_nccl, "FastMoE ensure torch nccl comm");
 
     m.def("fused_forward", &_fused_forward, "FastMoE fuse global exchange and linear forward");
+    m.def("fused_backward", &_fused_backward, "FastMoE fuse global exchange and linear backward");
 #endif
 
     m.def("expert_count", &_expert_count, "FastMoE count gate indices (CUDA)");
