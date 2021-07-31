@@ -97,6 +97,31 @@ void _compute_mlp_forward(
             ));
 }
 
+
+template<typename scalar_t>
+void _exchange_with(
+        const scalar_t* sendbuf, size_t sendcount, int t_send,
+        scalar_t* recvbuf, size_t recvcount, int t_recv,
+        long d_model,
+        cudaStream_t stream, ncclComm_t comm) {
+    if (sendcount) {
+        ncclSend(sendbuf, sendcount * d_model * sizeof(scalar_t),
+                ncclChar, t_send , comm, stream);
+    }
+    if (recvcount) {
+        ncclRecv(recvbuf, recvcount * d_model * sizeof(scalar_t),
+                ncclChar, t_recv, comm, stream);
+    }
+}
+
+
+#define GEN_BASE \
+    long to_base = (group_rank + step) % n_groups * pipeline_gran; \
+    long from_base = (group_rank + n_groups - step) % n_groups * pipeline_gran;
+#define GEN_IDX \
+    int idx_send = ei + rank_send * num_expert; \
+    int idx_recv = ei + rank_recv * num_expert;
+
 template<typename scalar_t>
 void fmoe_cuda_fused_forward_impl(
         const scalar_t* input_buf,
@@ -111,91 +136,83 @@ void fmoe_cuda_fused_forward_impl(
         const long* local_expert_count, 
         const long* global_expert_count, 
         long d_model, long d_hidden, 
-        long num_expert, long world_size,
+        long num_expert, long rank, long world_size,
         bool has_bias,
-        CudaStreamManager* smgr) {
+        long pipeline_gran, CudaStreamManager* smgr) {
 
-    int ptr = 0;
-    int send_ptr = 0;
-    int recv_ptr = 0;
-
-    int *expert_ptr = new int[num_expert * world_size];
-    expert_ptr[0] = 0;
-    for (int i = 1; i < num_expert * world_size; ++i) {
-        expert_ptr[i] = expert_ptr[i - 1] + local_expert_count[i - 1];
+    int *local_ptr = new int[num_expert * world_size + 1];
+    int *global_ptr = new int[num_expert * world_size + 1];
+    local_ptr[0] = global_ptr[0] = 0;
+    for (int i = 1; i <= num_expert * world_size; ++i) {
+        local_ptr[i] = local_ptr[i - 1] + local_expert_count[i - 1];
+        global_ptr[i] = global_ptr[i - 1] + global_expert_count[i - 1];
     }
 
-    for (int ei = 0; ei < num_expert; ++ei) {
-        int expert_count = 0;
-        NCCL_SAFE_CALL(ncclGroupStart());
-        for (int j = 0; j < world_size; ++j) {
-            int idx = ei + j * num_expert;
-            if (local_expert_count[idx]) {
-                NCCL_SAFE_CALL(ncclSend(
-                        input_buf + expert_ptr[idx] * d_model, 
-                        local_expert_count[idx] * d_model * sizeof(scalar_t),
-                        ncclChar, 
-                        j,
-                        smgr->ncclcomm,
-                        smgr->stream(0)));
-            }
-            if (global_expert_count[idx]) {
-                NCCL_SAFE_CALL(ncclRecv(
-                        global_input_buf + recv_ptr * d_model,
-                        global_expert_count[idx] * d_model * sizeof(scalar_t),
-                        ncclChar,
-                        j,
-                        smgr->ncclcomm,
-                        smgr->stream(0)));
-                recv_ptr += global_expert_count[idx];
-                expert_count += global_expert_count[idx];
-            }
-        }
-        NCCL_SAFE_CALL(ncclGroupEnd());
+    long n_groups = world_size / pipeline_gran;
+    long group_rank = rank / pipeline_gran;
 
-        _compute_mlp_forward(
-                global_input_buf,
-                weight1,
-                weight2,
-                middle_buf,
-                global_output_buf,
-                has_bias,
-                ei,
-                ptr,
-                expert_count,
-                d_model,
-                d_hidden,
-                smgr->stream(0),
-                smgr->handle(0));
-
-        ptr += expert_count;
-
-        NCCL_SAFE_CALL(ncclGroupStart());
-        for (int j = 0; j < world_size; ++j) {
-            int idx = ei + j * num_expert;
-            if (global_expert_count[idx]) {
-                NCCL_SAFE_CALL(ncclSend(
-                        global_output_buf + send_ptr * d_model,
-                        global_expert_count[idx] * d_model * sizeof(scalar_t),
-                        ncclChar,
-                        j,
-                        smgr->ncclcomm,
-                        smgr->stream(0)));
-                send_ptr += global_expert_count[idx];
-            }
-            if (local_expert_count[idx]) {
-                NCCL_SAFE_CALL(ncclRecv(
-                        output_buf + expert_ptr[idx] * d_model, 
-                        local_expert_count[idx] * d_model * sizeof(scalar_t),
-                        ncclChar,
-                        j,
-                        smgr->ncclcomm,
-                        smgr->stream(0)));
-            }
-        }
-        NCCL_SAFE_CALL(ncclGroupEnd());
+    cudaEvent_t *input_ready = new cudaEvent_t[n_groups];
+    cudaEvent_t *output_ready = new cudaEvent_t[n_groups];
+    for (long i = 0; i < n_groups; ++i) {
+        cudaEventCreate(input_ready + i);
+        cudaEventCreate(output_ready + i);
     }
-    delete [] expert_ptr;
+
+    for (long step = 0; step < n_groups; ++step) {
+        for (int ei = 0; ei < num_expert; ++ei) {
+            GEN_BASE;
+            NCCL_SAFE_CALL(ncclGroupStart());
+            for (int j = 0; j < pipeline_gran; ++j) {
+                int rank_send = j + to_base;
+                int rank_recv = j + from_base;
+                GEN_IDX;
+                _exchange_with(input_buf + local_ptr[idx_send] * d_model,
+                        local_expert_count[idx_send], rank_send,
+                        global_input_buf + global_ptr[idx_recv] * d_model,
+                        global_expert_count[idx_recv], rank_recv,
+                        d_model, smgr->stream(0), smgr->ncclcomm);
+            }
+            NCCL_SAFE_CALL(ncclGroupEnd());
+        }
+    }
+
+    for (long step = 0; step < n_groups; ++step) {
+        for (int ei = 0; ei < num_expert; ++ei) {
+            GEN_BASE;
+            long offset = global_ptr[from_base * num_expert];
+            long micro_batch_size = global_ptr[(from_base + pipeline_gran) * num_expert] - offset;
+            _compute_mlp_forward(
+                    global_input_buf, weight1, weight2,
+                    middle_buf, global_output_buf,
+                    has_bias,
+                    ei,
+                    offset, micro_batch_size,
+                    d_model, d_hidden,
+                    smgr->stream(0), smgr->handle(0));
+        }
+    }
+
+    for (long step = 0; step < n_groups; ++step) {
+        for (int ei = 0; ei < num_expert; ++ei) {
+            GEN_BASE;
+            NCCL_SAFE_CALL(ncclGroupStart());
+            for (int j = 0; j < pipeline_gran; ++j) {
+                int rank_send = j + from_base;
+                int rank_recv = j + to_base;
+                GEN_IDX;
+                _exchange_with(global_output_buf + global_ptr[idx_send] * d_model,
+                        global_expert_count[idx_send], rank_send,
+                        output_buf + local_ptr[idx_recv] * d_model,
+                        local_expert_count[idx_recv], rank_recv,
+                        d_model, smgr->stream(0), smgr->ncclcomm);
+            }
+            NCCL_SAFE_CALL(ncclGroupEnd());
+        }
+    }
+    delete [] local_ptr;
+    delete [] global_ptr;
+    delete [] input_ready;
+    delete [] output_ready;
     smgr->sync(0);
 }
 

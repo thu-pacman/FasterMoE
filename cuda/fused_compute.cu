@@ -1,10 +1,13 @@
 #ifdef FMOE_USE_NCCL
 
+#include <cstdlib>
 #include <vector>
 #include <torch/extension.h>
 #include <c10/cuda/CUDAGuard.h>
 
 #include "fused_compute.cuh"
+
+long pipeline_gran = -1;
 
 std::vector<torch::Tensor> _fused_forward(
         torch::Tensor input_buf,
@@ -14,6 +17,16 @@ std::vector<torch::Tensor> _fused_forward(
         torch::Tensor global_expert_count,
         long global_batch_size,
         long n_workers, bool has_bias) {
+
+    if (pipeline_gran == -1) {
+        char* p = getenv("FMOE_FUSE_GRAN");
+        if (p) {
+            pipeline_gran = atoi(p);
+        } else {
+            pipeline_gran = 4;
+        }
+    }
+
     const auto num_expert = local_expert_count.size(0) / n_workers;
     const auto d_hidden = weight1.size(1);
     const auto d_model = weight1.size(2);
@@ -25,6 +38,8 @@ std::vector<torch::Tensor> _fused_forward(
     auto global_output_buf = input_buf.new_empty({global_batch_size, d_model});
     auto output_buf = input_buf.new_empty({input_buf.size(0), d_model});
 
+    int rank;
+    ncclCommUserRank(smgr->ncclcomm, &rank);
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(input_buf.scalar_type(), 
             "fmoe_cuda_fused_forward", ([&] {
         fmoe_cuda_fused_forward_impl(
@@ -39,8 +54,8 @@ std::vector<torch::Tensor> _fused_forward(
 
             local_expert_count.data_ptr<long>(),
             global_expert_count.data_ptr<long>(),
-            d_model, d_hidden, num_expert, n_workers, has_bias,
-            smgr);
+            d_model, d_hidden, num_expert, rank, n_workers, has_bias,
+            pipeline_gran, smgr);
     }));
     return {output_buf, global_input_buf, global_middle_buf, global_output_buf};
 }
