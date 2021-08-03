@@ -7,7 +7,7 @@ import math
 import os
 
 from .functions import prepare_forward, ensure_comm
-from .functions import MOEScatter, MOEGather, MOELinear
+from .functions import MOEScatter, MOEGather, MOELinear, MOECache
 from .functions import AllGather, Slice
 from .fused_functions import MOEForward
 from .gates import NaiveGate
@@ -76,8 +76,16 @@ def mark_module_parallel_comm(module, comm):
         setattr(p, "dp_comm", comm)
 
 
-def _fmoe_general_global_forward(inp, gate, expert_fn, num_expert, world_size,
-        enable_fuse=False):
+def _fmoe_general_global_forward(
+    inp, 
+    gate, 
+    expert_fn, 
+    policy_fn, 
+    experts, 
+    num_expert, 
+    world_size, 
+    fused, 
+    enable_fuse=False):
     r"""
     A private function that performs the following steps to complete the MoE
     computation.
@@ -93,8 +101,9 @@ def _fmoe_general_global_forward(inp, gate, expert_fn, num_expert, world_size,
         pos,
         local_expert_count,
         global_expert_count,
+        all_expert_count,
+        all_global_expert_count,
         fwd_expert_count,
-        fwd_batch_size,
     ) = prepare_forward(gate, num_expert, world_size)
 
     topk = 1
@@ -104,6 +113,15 @@ def _fmoe_general_global_forward(inp, gate, expert_fn, num_expert, world_size,
     out_batch_size = inp.shape[0]
     if len(gate.shape) == 2:
         out_batch_size *= gate.shape[1]
+
+    inp, models, stored_models, fwd_expert_count, fwd_batch_size = MOECache.apply(
+        inp,
+        all_expert_count.view(world_size, world_size, num_expert),
+        all_global_expert_count.view(world_size, world_size, num_expert),
+        local_expert_count.view(world_size, num_expert), 
+        global_expert_count.view(world_size, num_expert), 
+        fwd_expert_count, policy_fn, experts,
+        inp.shape[0], inp.shape[1], topk, num_expert, world_size, fused)
 
     if enable_fuse:
         x = MOEForward.apply(
@@ -115,17 +133,61 @@ def _fmoe_general_global_forward(inp, gate, expert_fn, num_expert, world_size,
 
     x = MOEScatter.apply(
         inp, pos // topk,
-        local_expert_count, global_expert_count, fwd_batch_size, world_size
+        local_expert_count, global_expert_count, 
+        stored_models,
+        fwd_batch_size, world_size
     )
-    x = expert_fn(x, fwd_expert_count)
+    x = expert_fn(x, models, fwd_expert_count, num_expert)
 
     x = MOEGather.apply(
         x, pos,
         local_expert_count, global_expert_count,
+        stored_models,
         out_batch_size, world_size
     )
     return x
 
+def _default_policy(all_experts_count, all_global_expert_count, num_expert, world_size, d_model, fused):
+    bw_pcie = 88 * 1e9 / 8                     
+    bw_net = 50 * 1e9 / 8                                      
+    bw_mm = 11.5e12
+    
+    if fused:
+        all_experts_count = all_experts_count.sum(dim=-1).view(world_size, world_size, 1)
+        all_global_expert_count = all_global_expert_count.sum(dim=-1).view(world_size, world_size, 1)
+
+    fwd_expert_counts = all_global_expert_count.sum(1) # [world_size, num_expert]
+    default_counts = fwd_expert_counts.clone()
+    
+    _, indices = fwd_expert_counts.sort(0, descending=True)
+    
+    alphaHsquared = d_model * (d_model**2) * 4**2
+    
+    B_w = default_counts.max(0)[0]
+    lat_comp = 12 * B_w * alphaHsquared / bw_mm  + 4 * B_w * d_model * 4 / bw_net
+    
+    comm = float('+inf')
+    model_size = 2 * alphaHsquared * num_expert / bw_net * (1 + 2 * (world_size - 1) / world_size)
+    comp_time = 12 * alphaHsquared / bw_mm
+    
+    for i, index in enumerate(indices):
+        fwd_expert_counts[index] = 0
+        fwd_expert_counts += all_global_expert_count[index].view(world_size, -1)
+        
+        B_k = fwd_expert_counts.max(0)[0]
+        lat_comm = fwd_expert_counts.max(0)[0] * comp_time + (i+1) * model_size
+        
+        if lat_comm < comm:
+            comm = lat_comm
+        elif lat_comm > comm:
+            break
+    
+    res = all_experts_count.new_zeros(world_size, num_expert, dtype=bool)
+
+    if lat_comp > comm:
+        res[indices[:i]] = True
+    
+    return res
 
 class FMoE(nn.Module):
     r"""
@@ -156,6 +218,7 @@ class FMoE(nn.Module):
         gate=NaiveGate,
         expert=None,
         gate_hook=None,
+        policy_fn=_default_policy,
         mask=None,
         mask_dict=None,
         enable_fuse=False
@@ -193,22 +256,42 @@ class FMoE(nn.Module):
         self.enable_fuse = enable_fuse
         if enable_fuse:
             assert(self.experts_fused)
+        self.policy_fn=policy_fn
 
-    def expert_fn(self, inp, fwd_expert_count):
+    def expert_fn(self, inp, models, fwd_expert_count, num_expert):
         r"""
         The default expert function which either calls the experts as a whole
         or as separate experts.
         """
-        if self.experts_fused:
-            return self.experts(inp, fwd_expert_count)
-        outputs = []
-        base_idx = 0
-        for i in range(self.num_expert):
-            batch_size = fwd_expert_count[i].item()
-            inp_slice = inp[base_idx : base_idx + batch_size]
-            outputs.append(self.experts[i](inp_slice))
-            base_idx += batch_size
-        return torch.cat(outputs, dim=0)
+        res = []
+        
+        input_ptr = 0
+        for j, counts in enumerate(fwd_expert_count.view(-1, num_expert)):
+            size = counts.sum().item()
+
+            node_inp = inp[input_ptr:input_ptr + size]
+            input_ptr += size
+            experts = models[j] # node j's experts
+
+            if not experts:
+                if counts.any():
+                    raise ValueError(f'Experts is {experts} yet counts is {counts}')
+                continue
+                
+            if self.experts_fused:
+                res.append(experts[0](node_inp, counts))
+                continue
+            
+            outputs = []
+            base_idx = 0
+            for i in range(self.num_expert):
+                batch_size = counts[i].item()
+                inp_slice = node_inp[base_idx : base_idx + batch_size]
+                outputs.append(experts[i](inp_slice))
+                base_idx += batch_size
+            res.append(torch.cat(outputs, dim=0))
+        
+        return torch.cat(res, dim=0)
 
     def mark_parallel_comm(self, expert_dp_comm="none"):
         r"""
@@ -248,12 +331,17 @@ class FMoE(nn.Module):
             inp = inp[mask == 0, :]
             gate_top_k_idx = gate_top_k_idx[mask == 0, :]
 
-        expert_fn = self.expert_fn
         if self.enable_fuse:
             expert_fn = self.experts
         fwd = _fmoe_general_global_forward(
             inp, gate_top_k_idx,
-            expert_fn, self.num_expert, self.world_size, self.enable_fuse
+            self.expert_fn, 
+            self.policy_fn, 
+            self.experts, 
+            self.num_expert, 
+            self.world_size, 
+            self.experts_fused,
+            self.enable_fuse
         )
 
         # recover deleted tensors

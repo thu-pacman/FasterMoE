@@ -5,19 +5,42 @@
 // global_exchange
 #ifdef FMOE_USE_NCCL
 #include <c10d/ProcessGroupNCCL.hpp>
-torch::Tensor _expert_exchange(
+std::vector<torch::Tensor> _expert_exchange(
         torch::Tensor local_expert_count,
         long n_expert, long n_workers);
 torch::Tensor _global_scatter(
         torch::Tensor input_buf,
         torch::Tensor local_expert_count,
         torch::Tensor global_expert_count,
+        torch::Tensor stored_models,
         long batch_size, long n_workers);
 torch::Tensor _global_gather(
         torch::Tensor output_buf,
         torch::Tensor local_expert_count,
         torch::Tensor global_expert_count,
+        torch::Tensor stored_models,
         long batch_size, long n_workers);
+//TODO remove this function
+std::vector<torch::Tensor> _exchange_cache_info(
+        torch::Tensor sent_models,
+        long num_expert,
+        long world_size);
+int _model_exchange(
+        torch::Tensor stored_models,
+        std::vector<torch::Tensor> local_params,
+        std::vector<std::vector<torch::Tensor>> params,
+        long num_expert, long world_size);
+torch::Tensor _generate_cached_count(
+        torch::Tensor local_expert_count,
+        torch::Tensor global_expert_count,
+        torch::Tensor stored_models,
+        long num_expert, long world_size);
+void _gradient_exchange(
+        torch::Tensor stored_models,
+        std::vector<torch::Tensor> local_grads,
+        std::vector<std::vector<torch::Tensor>> grads,
+        long num_expert, long world_size);
+
 void _ensure_nccl(c10d::ProcessGroupNCCL& p, torch::Tensor t);
 #endif  // FMOE_USE_NCCL
 
@@ -84,6 +107,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
     m.def("fused_forward", &_fused_forward, "FastMoE fuse global exchange and linear forward");
     m.def("fused_backward", &_fused_backward, "FastMoE fuse global exchange and linear backward");
+    m.def("exchange_cache_info", &_exchange_cache_info, "FastMoE exchange cache info (CUDA)");
+    m.def("model_exchange", &_model_exchange, "FastMoE model exchange (CUDA)");
+    m.def("generate_cached_count", &_generate_cached_count, "FastMoE generate cached count (CUDA)");
+    m.def("gradient_exchange", &_gradient_exchange, "FastMoE gradient exchange (CUDA)");
 #endif
 
     m.def("expert_count", &_expert_count, "FastMoE count gate indices (CUDA)");
