@@ -79,21 +79,21 @@ torch::Tensor _prune_gate_by_capacity(
 // fused functions
 std::vector<torch::Tensor> _fused_forward(
         torch::Tensor input_buf,
-        torch::Tensor weight1,
-        torch::Tensor weight2,
+        std::vector<std::vector<std::vector<torch::Tensor>>> params,
         torch::Tensor local_expert_count,
         torch::Tensor global_expert_count,
-        long global_batch_size,
+        torch::Tensor stored_models,
+        torch::Tensor global_batch_size,
         long n_workers, bool has_bias);
 std::vector<torch::Tensor> _fused_backward(
         torch::Tensor input_buf,
-        torch::Tensor weight1,
-        torch::Tensor weight2,
+        std::vector<std::vector<std::vector<torch::Tensor>>> params,
         torch::Tensor middle_buf,
         torch::Tensor output_buf,
         torch::Tensor grad_out,
         torch::Tensor local_expert_count,
         torch::Tensor global_expert_count,
+        torch::Tensor stored_models,
         long global_batch_size,
         long buf_batch_size,
         long n_workers, bool has_bias);

@@ -125,10 +125,11 @@ def _fmoe_general_global_forward(
 
     if enable_fuse:
         x = MOEForward.apply(
-                inp, expert_fn.htoh4.weight, expert_fn.h4toh.weight,
+                inp, models,
                 pos // topk, pos,
                 local_expert_count, global_expert_count,
-                fwd_batch_size, out_batch_size, world_size)
+                stored_models,
+                fwd_expert_count, out_batch_size, world_size)
         return x
 
     x = MOEScatter.apply(
@@ -331,8 +332,7 @@ class FMoE(nn.Module):
             inp = inp[mask == 0, :]
             gate_top_k_idx = gate_top_k_idx[mask == 0, :]
 
-        if self.enable_fuse:
-            expert_fn = self.experts
+
         fwd = _fmoe_general_global_forward(
             inp, gate_top_k_idx,
             self.expert_fn, 

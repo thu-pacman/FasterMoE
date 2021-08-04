@@ -191,10 +191,12 @@ void _exchange_with(
         long d_model,
         cudaStream_t stream, ncclComm_t comm) {
     if (sendcount) {
+        //printf("Sending to %d size %d\n", t_send, sendcount);
         ncclSend(sendbuf, sendcount * d_model * sizeof(scalar_t),
                 ncclChar, t_send , comm, stream);
     }
     if (recvcount) {
+        //printf("Receiving from %d size %d\n", t_recv, recvcount);
         ncclRecv(recvbuf, recvcount * d_model * sizeof(scalar_t),
                 ncclChar, t_recv, comm, stream);
     }
@@ -206,21 +208,24 @@ void _exchange_with(
     long from_base = (group_rank + n_groups - _step) % n_groups * pipeline_gran;
 #define GEN_IDX \
     int idx_send = ei + rank_send * num_expert; \
-    int idx_recv = ei + rank_recv * num_expert;
+    int idx_recv = ei + rank_recv * num_expert; \
+    int idx_self = ei +      rank * num_expert;
 
 template<typename scalar_t>
 void fmoe_cuda_fused_forward_impl(
         const scalar_t* input_buf,
-        const scalar_t* weight1,
-        const scalar_t* weight2,
+        std::vector<std::vector<std::vector<torch::Tensor>>> params,
 
         scalar_t* global_input_buf,
         scalar_t* middle_buf,
+        scalar_t* cache_middle_buf,
         scalar_t* global_output_buf,
         scalar_t* output_buf,
 
         const long* local_expert_count, 
         const long* global_expert_count, 
+        const bool* stored_models,
+
         long d_model, long d_hidden, 
         long num_expert, long rank, long world_size,
         bool has_bias,
@@ -228,10 +233,25 @@ void fmoe_cuda_fused_forward_impl(
 
     int *local_ptr = new int[num_expert * world_size + 1];
     int *global_ptr = new int[num_expert * world_size + 1];
-    local_ptr[0] = global_ptr[0] = 0;
+    int *local_global_ptr = new int[num_expert * world_size + 1]; // local fetched models tracker
+
+    local_ptr[0] = global_ptr[0] = local_global_ptr[0] = 0;
+    
     for (int i = 1; i <= num_expert * world_size; ++i) {
         local_ptr[i] = local_ptr[i - 1] + local_expert_count[i - 1];
-        global_ptr[i] = global_ptr[i - 1] + global_expert_count[i - 1];
+        
+        global_ptr[i] = global_ptr[i - 1];
+        local_global_ptr[i] = local_global_ptr[i - 1];
+
+        // if model fetched, add local tokens
+        if (stored_models[i - 1]){
+            local_global_ptr[i] +=  local_expert_count[i - 1];
+        }
+
+        // if local model wasn't fetched, receive global tokens
+        if (!stored_models[rank + ((i-1) % num_expert)]) {
+            global_ptr[i] += global_expert_count[i - 1];
+        }
     }
 
     long n_groups = world_size / pipeline_gran;
@@ -253,9 +273,9 @@ void fmoe_cuda_fused_forward_impl(
                 int rank_recv = j + from_base;
                 GEN_IDX;
                 _exchange_with(input_buf + local_ptr[idx_send] * d_model,
-                        local_expert_count[idx_send], rank_send,
+                        local_expert_count[idx_send] * !stored_models[idx_send], rank_send,
                         global_input_buf + global_ptr[idx_recv] * d_model,
-                        global_expert_count[idx_recv], rank_recv,
+                        global_expert_count[idx_recv] * !stored_models[idx_self], rank_recv,
                         d_model, smgr->stream(0), smgr->ncclcomm);
             }
             NCCL_SAFE_CALL(ncclGroupEnd());
@@ -263,12 +283,17 @@ void fmoe_cuda_fused_forward_impl(
         cudaEventRecord(input_ready[step], smgr->stream(0));
     }
 
+    // auto node = stored_models[from_base * num_expert + ei] ? from_base : rank;
+    scalar_t * weight1 = params[rank][0][0].data_ptr<scalar_t>();
+    scalar_t * weight2 = params[rank][0][2].data_ptr<scalar_t>();
+
     for (long step = 0; step < n_groups; ++step) {
         cudaStreamWaitEvent(smgr->stream(1), input_ready[step], 0);
         for (int ei = 0; ei < num_expert; ++ei) {
             GEN_BASE(step);
             long offset = global_ptr[from_base * num_expert];
             long micro_batch_size = global_ptr[(from_base + pipeline_gran) * num_expert] - offset;
+                    
             _compute_mlp_forward(
                     global_input_buf, weight1, weight2,
                     middle_buf, global_output_buf,
@@ -291,18 +316,44 @@ void fmoe_cuda_fused_forward_impl(
                 int rank_recv = j + to_base;
                 GEN_IDX;
                 _exchange_with(global_output_buf + global_ptr[idx_send] * d_model,
-                        global_expert_count[idx_send], rank_send,
+                        global_expert_count[idx_send] * !stored_models[idx_self], rank_send,
                         output_buf + local_ptr[idx_recv] * d_model,
-                        local_expert_count[idx_recv], rank_recv,
+                        local_expert_count[idx_recv] * !stored_models[idx_recv], rank_recv,
                         d_model, smgr->stream(0), smgr->ncclcomm);
             }
             NCCL_SAFE_CALL(ncclGroupEnd());
         }
     }
 
+    // TODO local movement + computation
+    int offset = global_ptr[world_size * num_expert];
+    for (int j = 0; j < world_size; j++) {
+        
+        for (int i = 0; i < num_expert; i++) {
+            int idx = j * num_expert + i;
+            if (!stored_models[idx])
+                continue;
+            weight1 = params[j][0][0].data_ptr<scalar_t>();
+            weight2 = params[j][0][2].data_ptr<scalar_t>();
+
+            _compute_mlp_forward(
+                input_buf, weight1, weight2,
+                cache_middle_buf, output_buf,
+                has_bias,
+                i,
+                local_ptr[idx], local_expert_count[idx],
+                d_model, d_hidden,
+                smgr->stream(2), smgr->handle(1));
+
+        }
+    }
+
+
     delete [] local_ptr;
     delete [] global_ptr;
-    smgr->sync(0);
+    delete [] local_global_ptr;
+    smgr->sync(3);
+    checkCudaErrors(cudaGetLastError());
     for (long i = 0; i < n_groups; ++i) {
         cudaEventDestroy(input_ready[i]);
         cudaEventDestroy(output_ready[i]);
@@ -315,9 +366,9 @@ void fmoe_cuda_fused_forward_impl(
 template<typename scalar_t>
 void fmoe_cuda_fused_backward_impl(
         const scalar_t* input_buf,
-        const scalar_t* weight1,
-        const scalar_t* weight2,
+        std::vector<std::vector<std::vector<torch::Tensor>>> params,
         const scalar_t* middle_buf,
+        const scalar_t* cache_middle_buf,
         const scalar_t* output_buf,
         const scalar_t* grad_out,
 
@@ -325,12 +376,12 @@ void fmoe_cuda_fused_backward_impl(
         scalar_t* global_grad_in,
 
         scalar_t* grad_middle,
-        scalar_t* grad_weight1,
-        scalar_t* grad_weight2,
+        scalar_t* cache_grad_middle,
         scalar_t* grad_in,
 
         const long* local_expert_count, 
         const long* global_expert_count, 
+        const bool* stored_models,
         long d_model, long d_hidden, 
         long num_expert, long rank, long world_size,
         bool has_bias,
@@ -338,10 +389,25 @@ void fmoe_cuda_fused_backward_impl(
 
     int *local_ptr = new int[num_expert * world_size + 1];
     int *global_ptr = new int[num_expert * world_size + 1];
-    local_ptr[0] = global_ptr[0] = 0;
+    int *local_global_ptr = new int[num_expert * world_size + 1]; // local fetched models tracker
+
+    local_ptr[0] = global_ptr[0] = local_global_ptr[0] = 0;
+    
     for (int i = 1; i <= num_expert * world_size; ++i) {
         local_ptr[i] = local_ptr[i - 1] + local_expert_count[i - 1];
-        global_ptr[i] = global_ptr[i - 1] + global_expert_count[i - 1];
+        
+        global_ptr[i] = global_ptr[i - 1];
+        local_global_ptr[i] = local_global_ptr[i - 1];
+
+        // if model fetched, add local tokens
+        if (stored_models[i - 1]){
+            local_global_ptr[i] +=  local_expert_count[i - 1];
+        }
+
+        // if local model wasn't fetched, receive global tokens
+        if (!stored_models[rank + ((i-1) % num_expert)]) {
+            global_ptr[i] += global_expert_count[i - 1];
+        }
     }
 
     long n_groups = world_size / pipeline_gran;
@@ -363,9 +429,9 @@ void fmoe_cuda_fused_backward_impl(
                 int rank_recv = j + from_base;
                 GEN_IDX;
                 _exchange_with(grad_out + local_ptr[idx_send] * d_model,
-                        local_expert_count[idx_send], rank_send,
+                        local_expert_count[idx_send] * !stored_models[idx_send], rank_send,
                         global_grad_out + global_ptr[idx_recv] * d_model,
-                        global_expert_count[idx_recv], rank_recv,
+                        global_expert_count[idx_recv] * !stored_models[idx_self], rank_recv,
                         d_model, smgr->stream(0), smgr->ncclcomm);
             }
             NCCL_SAFE_CALL(ncclGroupEnd());
@@ -373,6 +439,11 @@ void fmoe_cuda_fused_backward_impl(
         cudaEventRecord(input_ready[step], smgr->stream(0));
     }
 
+    scalar_t * weight1 = params[rank][0][0].data_ptr<scalar_t>();
+    scalar_t * weight2 = params[rank][0][2].data_ptr<scalar_t>();
+    scalar_t * grad_weight1 = params[rank][0][0].mutable_grad().data_ptr<scalar_t>();
+    scalar_t * grad_weight2 = params[rank][0][2].mutable_grad().data_ptr<scalar_t>();
+    
     for (long step = 0; step < n_groups; ++step) {
         cudaStreamWaitEvent(smgr->stream(1), input_ready[step], 0);
         for (int ei = 0; ei < num_expert; ++ei) {
@@ -402,18 +473,46 @@ void fmoe_cuda_fused_backward_impl(
                 int rank_recv = j + to_base;
                 GEN_IDX;
                 _exchange_with(global_grad_in + global_ptr[idx_send] * d_model,
-                        global_expert_count[idx_send], rank_send,
+                        global_expert_count[idx_send] * !stored_models[idx_self], rank_send,
                         grad_in + local_ptr[idx_recv] * d_model,
-                        local_expert_count[idx_recv], rank_recv,
+                        local_expert_count[idx_recv] * !stored_models[idx_recv], rank_recv,
                         d_model, smgr->stream(0), smgr->ncclcomm);
             }
             NCCL_SAFE_CALL(ncclGroupEnd());
         }
     }
 
+    int offset = global_ptr[world_size * num_expert];
+    for (int j = 0; j < world_size; j++) {
+        
+        for (int i = 0; i < num_expert; i++) {
+            int idx = j * num_expert + i;
+            if (!stored_models[idx])
+                continue;
+            
+            weight1 = params[j][0][0].mutable_grad().data_ptr<scalar_t>();
+            weight2 = params[j][0][2].mutable_grad().data_ptr<scalar_t>();    
+            grad_weight1 = params[j][0][0].mutable_grad().data_ptr<scalar_t>();
+            grad_weight2 = params[j][0][2].mutable_grad().data_ptr<scalar_t>();
+    
+            _compute_mlp_backward(
+                input_buf, weight1, weight2,
+                cache_middle_buf, output_buf, global_grad_out,
+                cache_grad_middle, grad_weight1, grad_weight2, global_grad_in,
+                has_bias,
+                i,
+                local_ptr[idx], local_expert_count[idx],
+                d_model, d_hidden, 0, // we never consider it to be the first since it's already initialized to zero and we are lazy
+                smgr->stream(2), smgr->handle(2));
+
+        }
+    }
+
+
     delete [] local_ptr;
     delete [] global_ptr;
-    smgr->sync(0);
+    delete [] local_global_ptr;
+    smgr->sync(3);
     for (long i = 0; i < n_groups; ++i) {
         cudaEventDestroy(input_ready[i]);
         cudaEventDestroy(output_ready[i]);

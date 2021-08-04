@@ -13,22 +13,28 @@ class MOEForward(Function):
     @staticmethod
     def forward(
             ctx,
-            inp, weight1, weight2,
+            inp, models,
             pos_s, pos_g,
             local_expert_count, global_expert_count,
-            fwd_batch_size, out_batch_size,
+            stored_models,
+            fwd_expert_count, out_batch_size,
             world_size):
         local_input_buf = _local_scatter(inp, pos_s)
+
+        model_params = [[tuple(m.parameters()) for m in node] for node in models]
         local_output_buf, gib, gmb, gob = fmoe_cuda.fused_forward(
-                local_input_buf, weight1, weight2,
-                local_expert_count, global_expert_count, fwd_batch_size,
+                local_input_buf, model_params,
+                local_expert_count, global_expert_count, 
+                stored_models, fwd_expert_count,
                 world_size, False)
+
         out = _local_gather(local_output_buf, pos_g, out_batch_size,
                 maybe_overlap=False)
-
+        
         variables = (pos_s, pos_g, local_expert_count, global_expert_count,
-                weight1, weight2, gib, gmb, gob)
-        ctx.moe_args = fwd_batch_size, inp.shape[0], world_size
+                gib, gmb, gob, stored_models)
+        
+        ctx.moe_args = fwd_expert_count.sum().item(), inp.shape[0], world_size, model_params
         ctx.save_for_backward(*variables)
 
         return out
@@ -36,16 +42,17 @@ class MOEForward(Function):
     @staticmethod
     def backward(ctx, grad_out):
         (pos_s, pos_g, local_expert_count, global_expert_count,
-                weight1, weight2, gib, gmb, gob) = ctx.saved_tensors
-        (fwd_batch_size, inp_batch_size, world_size) = ctx.moe_args
+                gib, gmb, gob, stored_models) = ctx.saved_tensors
+        (fwd_batch_size, inp_batch_size, world_size, model_params) = ctx.moe_args
 
         grad_out_buf = _local_scatter(grad_out.contiguous(), pos_g)
-        grad_in_buf, grad_weight1, grad_weight2 = fmoe_cuda.fused_backward(
-                gib, weight1, weight2, gmb, gob, grad_out_buf,
+        (grad_in_buf, )  = fmoe_cuda.fused_backward(
+                gib, model_params, gmb, gob, grad_out_buf,
                 local_expert_count, global_expert_count,
+                stored_models,
                 fwd_batch_size, pos_s.shape[0],
                 world_size, False)
         grad_in = _local_gather(grad_in_buf, pos_s, inp_batch_size)
 
-        return (grad_in, grad_weight1, grad_weight2, None, None, None, None, 
+        return (grad_in, None, None, None, None, None, None, 
                 None, None, None)
