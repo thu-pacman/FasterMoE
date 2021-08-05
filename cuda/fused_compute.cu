@@ -15,7 +15,7 @@ std::vector<torch::Tensor> _fused_forward(
         torch::Tensor local_expert_count,
         torch::Tensor global_expert_count,
         torch::Tensor stored_models,
-        torch::Tensor fwd_expert_count,
+        long global_batch_size,
         long n_workers, bool has_bias) {
 
     if (pipeline_gran == -1) {
@@ -35,12 +35,11 @@ std::vector<torch::Tensor> _fused_forward(
     const auto d_hidden = params[rank][0][0].size(1);
     const auto d_model = params[rank][0][0].size(2);
 
-    auto global_batch_size = fwd_expert_count.sum().item<int>();
     auto global_input_buf = input_buf.new_zeros({global_batch_size, d_model});
     auto global_middle_buf = input_buf.new_zeros({global_batch_size, d_hidden});
-    auto cache_middle_buf = input_buf.new_zeros({global_batch_size, d_hidden});
     auto global_output_buf = input_buf.new_zeros({global_batch_size, d_model});
-    auto output_buf = input_buf.new_zeros({input_buf.size(0), d_model}).add(159);
+    
+    auto output_buf = input_buf.new_zeros({input_buf.size(0), d_model});
 
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(input_buf.scalar_type(), 
             "fmoe_cuda_fused_forward", ([&] {
@@ -50,7 +49,6 @@ std::vector<torch::Tensor> _fused_forward(
 
             global_input_buf.data_ptr<scalar_t>(),
             global_middle_buf.data_ptr<scalar_t>(),
-            cache_middle_buf.data_ptr<scalar_t>(),
             global_output_buf.data_ptr<scalar_t>(),
             output_buf.data_ptr<scalar_t>(),
 
@@ -88,18 +86,17 @@ std::vector<torch::Tensor> _fused_backward(
 
     auto global_grad_out = input_buf.new_zeros({global_batch_size, d_model});
     auto grad_middle = input_buf.new_zeros({global_batch_size, d_hidden});
-    auto cache_grad_middle = input_buf.new_zeros({global_batch_size, d_hidden});
     auto global_grad_in = input_buf.new_zeros({global_batch_size, d_model});
-
-    auto cache_middle_buf = middle_buf.clone();
-
-    auto grad_in = input_buf.new_zeros({buf_batch_size, d_model});
     
+    auto grad_in = input_buf.new_zeros({buf_batch_size, d_model});
+    // std::cout << "Rank " << rank << " Buf batch size " << buf_batch_size << " input buf size " << input_buf.sizes() << std::endl;
     for (auto node : params)
         for (auto expert : node)
             for (int i = 0; i < expert.size(); i++) {
                 // create the respective gradient of each tensor
+                CHECK_INPUT(expert[i]);
                 expert[i].mutable_grad() = input_buf.new_zeros(expert[i].sizes());
+                CHECK_INPUT(expert[i].grad());
             }
 
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(input_buf.scalar_type(), 
@@ -109,7 +106,6 @@ std::vector<torch::Tensor> _fused_backward(
             params,
 
             middle_buf.data_ptr<scalar_t>(),
-            cache_middle_buf.data_ptr<scalar_t>(),
             output_buf.data_ptr<scalar_t>(),
             grad_out.data_ptr<scalar_t>(),
 
@@ -117,7 +113,6 @@ std::vector<torch::Tensor> _fused_backward(
             global_grad_in.data_ptr<scalar_t>(),
 
             grad_middle.data_ptr<scalar_t>(),
-            cache_grad_middle.data_ptr<scalar_t>(),
             grad_in.data_ptr<scalar_t>(),
 
             local_expert_count.data_ptr<long>(),

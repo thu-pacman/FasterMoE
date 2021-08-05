@@ -218,7 +218,6 @@ void fmoe_cuda_fused_forward_impl(
 
         scalar_t* global_input_buf,
         scalar_t* middle_buf,
-        scalar_t* cache_middle_buf,
         scalar_t* global_output_buf,
         scalar_t* output_buf,
 
@@ -293,7 +292,7 @@ void fmoe_cuda_fused_forward_impl(
             GEN_BASE(step);
             long offset = global_ptr[from_base * num_expert];
             long micro_batch_size = global_ptr[(from_base + pipeline_gran) * num_expert] - offset;
-                    
+            
             _compute_mlp_forward(
                     global_input_buf, weight1, weight2,
                     middle_buf, global_output_buf,
@@ -337,13 +336,13 @@ void fmoe_cuda_fused_forward_impl(
             weight2 = params[j][0][2].data_ptr<scalar_t>();
 
             _compute_mlp_forward(
-                input_buf, weight1, weight2,
-                cache_middle_buf, output_buf,
+                input_buf + local_ptr[idx], weight1, weight2,
+                middle_buf + offset + local_global_ptr[idx], output_buf + offset + local_global_ptr[idx],
                 has_bias,
                 i,
-                local_ptr[idx], local_expert_count[idx],
+                0, local_expert_count[idx],
                 d_model, d_hidden,
-                smgr->stream(2), smgr->handle(1));
+                smgr->stream(2), smgr->handle(2));
 
         }
     }
@@ -368,7 +367,6 @@ void fmoe_cuda_fused_backward_impl(
         const scalar_t* input_buf,
         std::vector<std::vector<std::vector<torch::Tensor>>> params,
         const scalar_t* middle_buf,
-        const scalar_t* cache_middle_buf,
         const scalar_t* output_buf,
         const scalar_t* grad_out,
 
@@ -376,7 +374,6 @@ void fmoe_cuda_fused_backward_impl(
         scalar_t* global_grad_in,
 
         scalar_t* grad_middle,
-        scalar_t* cache_grad_middle,
         scalar_t* grad_in,
 
         const long* local_expert_count, 
@@ -450,6 +447,7 @@ void fmoe_cuda_fused_backward_impl(
             GEN_BASE(step);
             long offset = global_ptr[from_base * num_expert];
             long micro_batch_size = global_ptr[(from_base + pipeline_gran) * num_expert] - offset;
+
             _compute_mlp_backward(
                     input_buf, weight1, weight2,
                     middle_buf, output_buf, global_grad_out,
@@ -482,6 +480,8 @@ void fmoe_cuda_fused_backward_impl(
         }
     }
 
+    checkCudaErrors(cudaGetLastError());
+
     int offset = global_ptr[world_size * num_expert];
     for (int j = 0; j < world_size; j++) {
         
@@ -490,18 +490,18 @@ void fmoe_cuda_fused_backward_impl(
             if (!stored_models[idx])
                 continue;
             
-            weight1 = params[j][0][0].mutable_grad().data_ptr<scalar_t>();
-            weight2 = params[j][0][2].mutable_grad().data_ptr<scalar_t>();    
+            weight1 = params[j][0][0].data_ptr<scalar_t>();
+            weight2 = params[j][0][2].data_ptr<scalar_t>();    
             grad_weight1 = params[j][0][0].mutable_grad().data_ptr<scalar_t>();
             grad_weight2 = params[j][0][2].mutable_grad().data_ptr<scalar_t>();
-    
+            
             _compute_mlp_backward(
-                input_buf, weight1, weight2,
-                cache_middle_buf, output_buf, global_grad_out,
-                cache_grad_middle, grad_weight1, grad_weight2, global_grad_in,
+                input_buf + offset + local_global_ptr[idx], weight1, weight2,
+                middle_buf + offset + local_global_ptr[idx], output_buf + offset + local_global_ptr[idx], grad_out + local_ptr[idx],
+                grad_middle + offset + local_global_ptr[idx], grad_weight1, grad_weight2, grad_in + local_ptr[idx],
                 has_bias,
                 i,
-                local_ptr[idx], local_expert_count[idx],
+                0, local_expert_count[idx],
                 d_model, d_hidden, 0, // we never consider it to be the first since it's already initialized to zero and we are lazy
                 smgr->stream(2), smgr->handle(2));
 
@@ -513,6 +513,7 @@ void fmoe_cuda_fused_backward_impl(
     delete [] global_ptr;
     delete [] local_global_ptr;
     smgr->sync(3);
+    checkCudaErrors(cudaGetLastError());
     for (long i = 0; i < n_groups; ++i) {
         cudaEventDestroy(input_ready[i]);
         cudaEventDestroy(output_ready[i]);

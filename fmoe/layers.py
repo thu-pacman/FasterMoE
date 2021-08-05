@@ -129,7 +129,7 @@ def _fmoe_general_global_forward(
                 pos // topk, pos,
                 local_expert_count, global_expert_count,
                 stored_models,
-                fwd_expert_count, out_batch_size, world_size)
+                fwd_expert_count.sum().item(), out_batch_size, world_size)
         return x
 
     x = MOEScatter.apply(

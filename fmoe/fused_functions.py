@@ -17,7 +17,7 @@ class MOEForward(Function):
             pos_s, pos_g,
             local_expert_count, global_expert_count,
             stored_models,
-            fwd_expert_count, out_batch_size,
+            fwd_batch_size, out_batch_size,
             world_size):
         local_input_buf = _local_scatter(inp, pos_s)
 
@@ -25,7 +25,7 @@ class MOEForward(Function):
         local_output_buf, gib, gmb, gob = fmoe_cuda.fused_forward(
                 local_input_buf, model_params,
                 local_expert_count, global_expert_count, 
-                stored_models, fwd_expert_count,
+                stored_models, fwd_batch_size,
                 world_size, False)
 
         out = _local_gather(local_output_buf, pos_g, out_batch_size,
@@ -34,7 +34,7 @@ class MOEForward(Function):
         variables = (pos_s, pos_g, local_expert_count, global_expert_count,
                 gib, gmb, gob, stored_models)
         
-        ctx.moe_args = fwd_expert_count.sum().item(), inp.shape[0], world_size, model_params
+        ctx.moe_args = fwd_batch_size, inp.shape[0], world_size, model_params
         ctx.save_for_backward(*variables)
 
         return out
@@ -52,6 +52,8 @@ class MOEForward(Function):
                 stored_models,
                 fwd_batch_size, pos_s.shape[0],
                 world_size, False)
+        # print('We reached here so everything should be fine')
+        # torch.distributed.barrier()
         grad_in = _local_gather(grad_in_buf, pos_s, inp_batch_size)
 
         return (grad_in, None, None, None, None, None, None, 

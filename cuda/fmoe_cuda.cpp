@@ -83,7 +83,7 @@ std::vector<torch::Tensor> _fused_forward(
         torch::Tensor local_expert_count,
         torch::Tensor global_expert_count,
         torch::Tensor stored_models,
-        torch::Tensor global_batch_size,
+        long global_batch_size,
         long n_workers, bool has_bias);
 std::vector<torch::Tensor> _fused_backward(
         torch::Tensor input_buf,
