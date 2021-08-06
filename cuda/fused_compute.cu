@@ -95,8 +95,12 @@ std::vector<torch::Tensor> _fused_backward(
             for (int i = 0; i < expert.size(); i++) {
                 // create the respective gradient of each tensor
                 CHECK_INPUT(expert[i]);
+                if (expert[i].grad().defined()) {
+                    CHECK_INPUT(expert[i].grad());
+                    continue;
+                }
+
                 expert[i].mutable_grad() = input_buf.new_zeros(expert[i].sizes());
-                CHECK_INPUT(expert[i].grad());
             }
 
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(input_buf.scalar_type(), 

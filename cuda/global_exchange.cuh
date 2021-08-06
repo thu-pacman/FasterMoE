@@ -235,6 +235,42 @@ void fmoe_cuda_model_exchange_impl(
 }
 
 
+void exchange_reduce(float * param, int size, int j, CudaStreamManager * smgr) {
+    NCCL_SAFE_CALL(ncclReduce(
+        param,
+        param,
+        size,
+        ncclFloat,
+        ncclSum,
+        j,
+        smgr->ncclcomm,
+        smgr->stream(0)));
+}
+
+void exchange_reduce(double * param, int size, int j, CudaStreamManager * smgr) {
+    NCCL_SAFE_CALL(ncclReduce(
+        param,
+        param,
+        size,
+        ncclDouble,
+        ncclSum,
+        j,
+        smgr->ncclcomm,
+        smgr->stream(0)));
+}
+
+void exchange_reduce(c10::Half * param, int size, int j, CudaStreamManager * smgr) {
+    NCCL_SAFE_CALL(ncclReduce(
+        param,
+        param,
+        size,
+        ncclHalf,
+        ncclSum,
+        j,
+        smgr->ncclcomm,
+        smgr->stream(0)));
+}
+
 template<typename scalar_t>
 void fmoe_cuda_gradient_exchange_impl(
     bool * stored_models,
@@ -254,17 +290,9 @@ void fmoe_cuda_gradient_exchange_impl(
             if (stored_models[idx]) {
                 scalar_t * param = j == rank ? local_grads[i].data_ptr<scalar_t>() : grads[j][i].data_ptr<scalar_t>();
 
-                auto size = local_grads[i].numel() * sizeof(scalar_t);
+                auto size = local_grads[i].numel();
                 
-                NCCL_SAFE_CALL(ncclReduce(
-                    param,
-                    param,
-                    size,
-                    ncclChar,
-                    ncclSum,
-                    j,
-                    smgr->ncclcomm,
-                    smgr->stream(0)));
+                exchange_reduce(param, size, j, smgr);
             }
         }
     }
