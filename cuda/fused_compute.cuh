@@ -15,6 +15,8 @@
 #include "utils/fmoe_utils.h"
 #include "stream_manager.h"
 
+#define SMGR_N_STREAMS 16
+
 template<typename scalar_t>
 __global__ 
 void relu_kernel(scalar_t* a, size_t n) {
@@ -335,6 +337,8 @@ void fmoe_cuda_fused_forward_impl(
             weight1 = params[j][0][0].data_ptr<scalar_t>();
             weight2 = params[j][0][2].data_ptr<scalar_t>();
 
+            auto stream = 2 + (idx % (SMGR_N_STREAMS- 2));
+
             _compute_mlp_forward(
                 input_buf + local_ptr[idx], weight1, weight2,
                 middle_buf + offset + local_global_ptr[idx], output_buf + offset + local_global_ptr[idx],
@@ -342,7 +346,7 @@ void fmoe_cuda_fused_forward_impl(
                 i,
                 0, local_expert_count[idx],
                 d_model, d_hidden,
-                smgr->stream(2), smgr->handle(2));
+                smgr->stream(stream), smgr->handle(stream));
 
         }
     }
@@ -351,7 +355,7 @@ void fmoe_cuda_fused_forward_impl(
     delete [] local_ptr;
     delete [] global_ptr;
     delete [] local_global_ptr;
-    smgr->sync(3);
+    smgr->sync(SMGR_N_STREAMS+1);
     checkCudaErrors(cudaGetLastError());
     for (long i = 0; i < n_groups; ++i) {
         cudaEventDestroy(input_ready[i]);
@@ -495,6 +499,8 @@ void fmoe_cuda_fused_backward_impl(
             grad_weight1 = params[j][0][0].mutable_grad().data_ptr<scalar_t>();
             grad_weight2 = params[j][0][2].mutable_grad().data_ptr<scalar_t>();
             
+            auto stream = 2 + (idx % (SMGR_N_STREAMS- 2));
+
             _compute_mlp_backward(
                 input_buf + offset + local_global_ptr[idx], weight1, weight2,
                 middle_buf + offset + local_global_ptr[idx], output_buf + offset + local_global_ptr[idx], grad_out + local_ptr[idx],
@@ -503,7 +509,7 @@ void fmoe_cuda_fused_backward_impl(
                 i,
                 0, local_expert_count[idx],
                 d_model, d_hidden, 0, // we never consider it to be the first since it's already initialized to zero and we are lazy
-                smgr->stream(2), smgr->handle(2));
+                smgr->stream(stream), smgr->handle(stream));
 
         }
     }
@@ -512,7 +518,7 @@ void fmoe_cuda_fused_backward_impl(
     delete [] local_ptr;
     delete [] global_ptr;
     delete [] local_global_ptr;
-    smgr->sync(3);
+    smgr->sync(SMGR_N_STREAMS+1);
     checkCudaErrors(cudaGetLastError());
     for (long i = 0; i < n_groups; ++i) {
         cudaEventDestroy(input_ready[i]);
