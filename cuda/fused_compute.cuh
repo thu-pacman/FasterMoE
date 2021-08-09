@@ -319,7 +319,6 @@ void fmoe_cuda_fused_forward_impl(
             long micro_batch_size = global_ptr[ei * world_size + 
                 (from_base + pipeline_gran)] - offset;
             
-            fprintf(stderr, "%ld %ld %ld\n", ei, offset, micro_batch_size);
             _compute_mlp_forward(
                     global_input_buf, weight1, weight2,
                     middle_buf, global_output_buf,
