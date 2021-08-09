@@ -307,9 +307,9 @@ void fmoe_cuda_fused_forward_impl(
         cudaEventRecord(input_ready[step], smgr->stream(0));
     }
 
-    // auto node = stored_models[from_base * num_expert + ei] ? from_base : rank;
+    int last = params[rank][0].size() - 1; // bias = False
     scalar_t * weight1 = params[rank][0][0].data_ptr<scalar_t>();
-    scalar_t * weight2 = params[rank][0][2].data_ptr<scalar_t>();
+    scalar_t * weight2 = params[rank][0][last].data_ptr<scalar_t>();
 
     for (long step = 0; step < n_groups; ++step) {
         cudaStreamWaitEvent(smgr->stream(1), input_ready[step], 0);
@@ -359,7 +359,7 @@ void fmoe_cuda_fused_forward_impl(
             if (!stored_models[idx])
                 continue;
             weight1 = params[j][0][0].data_ptr<scalar_t>();
-            weight2 = params[j][0][2].data_ptr<scalar_t>();
+            weight2 = params[j][0][last].data_ptr<scalar_t>();
 
             auto stream = 2 + (idx % (SMGR_N_STREAMS- 2));
 
@@ -452,10 +452,11 @@ void fmoe_cuda_fused_backward_impl(
         cudaEventRecord(input_ready[step], smgr->stream(0));
     }
 
+    int last = params[rank][0].size() - 1; // bias = False
     scalar_t * weight1 = params[rank][0][0].data_ptr<scalar_t>();
-    scalar_t * weight2 = params[rank][0][2].data_ptr<scalar_t>();
+    scalar_t * weight2 = params[rank][0][last].data_ptr<scalar_t>();
     scalar_t * grad_weight1 = params[rank][0][0].mutable_grad().data_ptr<scalar_t>();
-    scalar_t * grad_weight2 = params[rank][0][2].mutable_grad().data_ptr<scalar_t>();
+    scalar_t * grad_weight2 = params[rank][0][last].mutable_grad().data_ptr<scalar_t>();
     
     for (long step = 0; step < n_groups; ++step) {
         cudaStreamWaitEvent(smgr->stream(1), input_ready[step], 0);
@@ -508,9 +509,9 @@ void fmoe_cuda_fused_backward_impl(
                 continue;
             
             weight1 = params[j][0][0].data_ptr<scalar_t>();
-            weight2 = params[j][0][2].data_ptr<scalar_t>();    
+            weight2 = params[j][0][last].data_ptr<scalar_t>();    
             grad_weight1 = params[j][0][0].mutable_grad().data_ptr<scalar_t>();
-            grad_weight2 = params[j][0][2].mutable_grad().data_ptr<scalar_t>();
+            grad_weight2 = params[j][0][last].mutable_grad().data_ptr<scalar_t>();
             
             auto stream = 2 + (idx % (SMGR_N_STREAMS- 2));
 
