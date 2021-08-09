@@ -250,11 +250,14 @@ void fmoe_cuda_fused_forward_impl(
         }
 
         // if local model wasn't fetched, receive global tokens
-        if (!stored_models[rank + ((i-1) % num_expert)]) {
+        if (!stored_models[rank * num_expert + ((i-1) % num_expert)]) {
             global_ptr[i] += global_expert_count[i - 1];
         }
     }
 
+    if (pipeline_gran > world_size) {
+        pipeline_gran = world_size;
+    }
     long n_groups = world_size / pipeline_gran;
     long group_rank = rank / pipeline_gran;
 
@@ -406,11 +409,14 @@ void fmoe_cuda_fused_backward_impl(
         }
 
         // if local model wasn't fetched, receive global tokens
-        if (!stored_models[rank + ((i-1) % num_expert)]) {
+        if (!stored_models[rank * num_expert + ((i-1) % num_expert)]) {
             global_ptr[i] += global_expert_count[i - 1];
         }
     }
 
+    if (pipeline_gran > world_size) {
+        pipeline_gran = world_size;
+    }
     long n_groups = world_size / pipeline_gran;
     long group_rank = rank / pipeline_gran;
 
