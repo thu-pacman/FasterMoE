@@ -102,7 +102,7 @@ void fmoe_cuda_global_scatter_impl(
                         smgr->stream(0)));
                 }
             }
-            if (global_expert_count[idx] && !stored_models[rank + i]) {
+            if (global_expert_count[idx] && !stored_models[rank * n_expert + i]) {
                 NCCL_SAFE_CALL(ncclRecv(
                         input_buf + recv_ptr * in_feat,
                         global_expert_count[idx] * in_feat * sizeof(scalar_t),
@@ -164,7 +164,7 @@ void fmoe_cuda_global_gather_impl(
                 }
             }
 
-            if (global_expert_count[idx] && !stored_models[rank + i]) {
+            if (global_expert_count[idx] && !stored_models[rank * n_expert + i]) {
                 NCCL_SAFE_CALL(ncclSend(
                     output_buf + send_ptr * out_feat,
                     global_expert_count[idx] * out_feat * sizeof(scalar_t),
