@@ -93,6 +93,7 @@ std::vector<torch::Tensor> _fused_backward(
         torch::Tensor grad_out,
         torch::Tensor local_expert_count,
         torch::Tensor global_expert_count,
+        torch::Tensor inp,
         torch::Tensor stored_models,
         long global_batch_size,
         long buf_batch_size,

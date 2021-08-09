@@ -69,6 +69,7 @@ std::vector<torch::Tensor> _fused_backward(
         torch::Tensor grad_out,
         torch::Tensor local_expert_count,
         torch::Tensor global_expert_count,
+        torch::Tensor inp,
         torch::Tensor stored_models,
         
         long global_batch_size,
@@ -89,7 +90,7 @@ std::vector<torch::Tensor> _fused_backward(
     auto global_grad_in = input_buf.new_zeros({global_batch_size, d_model});
     
     auto grad_in = input_buf.new_zeros({buf_batch_size, d_model});
-    // std::cout << "Rank " << rank << " Buf batch size " << buf_batch_size << " input buf size " << input_buf.sizes() << std::endl;
+    
     for (auto node : params)
         for (auto expert : node)
             for (int i = 0; i < expert.size(); i++) {
@@ -107,6 +108,7 @@ std::vector<torch::Tensor> _fused_backward(
             "fmoe_cuda_fused_backward", ([&] {
         fmoe_cuda_fused_backward_impl(
             input_buf.data_ptr<scalar_t>(),
+            inp.data_ptr<scalar_t>(),
             params,
 
             middle_buf.data_ptr<scalar_t>(),

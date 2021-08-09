@@ -32,7 +32,7 @@ class MOEForward(Function):
                 maybe_overlap=False)
         
         variables = (pos_s, pos_g, local_expert_count, global_expert_count,
-                gib, gmb, gob, stored_models)
+                gib, gmb, gob, stored_models, local_input_buf)
         
         ctx.moe_args = fwd_batch_size, inp.shape[0], world_size, model_params
         ctx.save_for_backward(*variables)
@@ -42,13 +42,14 @@ class MOEForward(Function):
     @staticmethod
     def backward(ctx, grad_out):
         (pos_s, pos_g, local_expert_count, global_expert_count,
-                gib, gmb, gob, stored_models) = ctx.saved_tensors
+                gib, gmb, gob, stored_models, local_input_buf) = ctx.saved_tensors
         (fwd_batch_size, inp_batch_size, world_size, model_params) = ctx.moe_args
 
         grad_out_buf = _local_scatter(grad_out.contiguous(), pos_g)
         (grad_in_buf, )  = fmoe_cuda.fused_backward(
                 gib, model_params, gmb, gob, grad_out_buf,
                 local_expert_count, global_expert_count,
+                local_input_buf,
                 stored_models,
                 fwd_batch_size, pos_s.shape[0],
                 world_size, False)

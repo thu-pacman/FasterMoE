@@ -193,12 +193,10 @@ void _exchange_with(
         long d_model,
         cudaStream_t stream, ncclComm_t comm) {
     if (sendcount) {
-        //printf("Sending to %d size %d\n", t_send, sendcount);
         ncclSend(sendbuf, sendcount * d_model * sizeof(scalar_t),
                 ncclChar, t_send , comm, stream);
     }
     if (recvcount) {
-        //printf("Receiving from %d size %d\n", t_recv, recvcount);
         ncclRecv(recvbuf, recvcount * d_model * sizeof(scalar_t),
                 ncclChar, t_recv, comm, stream);
     }
@@ -364,8 +362,8 @@ void fmoe_cuda_fused_forward_impl(
             auto stream = 2 + (idx % (SMGR_N_STREAMS- 2));
 
             _compute_mlp_forward(
-                input_buf + local_ptr[idx], weight1, weight2,
-                middle_buf + offset + local_global_ptr[idx], output_buf + offset + local_global_ptr[idx],
+                input_buf + local_ptr[idx] * d_model, weight1, weight2,
+                middle_buf + (offset + local_global_ptr[idx]) * d_hidden, output_buf + local_ptr[idx] * d_model,
                 has_bias,
                 i,
                 0, local_expert_count[idx],
@@ -393,6 +391,7 @@ void fmoe_cuda_fused_forward_impl(
 template<typename scalar_t>
 void fmoe_cuda_fused_backward_impl(
         const scalar_t* input_buf,
+        const scalar_t* original_input_buf,
         std::vector<std::vector<std::vector<torch::Tensor>>> params,
         const scalar_t* middle_buf,
         const scalar_t* output_buf,
@@ -516,9 +515,9 @@ void fmoe_cuda_fused_backward_impl(
             auto stream = 2 + (idx % (SMGR_N_STREAMS- 2));
 
             _compute_mlp_backward(
-                input_buf + offset + local_global_ptr[idx], weight1, weight2,
-                middle_buf + offset + local_global_ptr[idx], output_buf + offset + local_global_ptr[idx], grad_out + local_ptr[idx],
-                grad_middle + offset + local_global_ptr[idx], grad_weight1, grad_weight2, grad_in + local_ptr[idx],
+                original_input_buf + local_ptr[idx] * d_model, weight1, weight2,
+                middle_buf + (offset + local_global_ptr[idx]) * d_hidden, output_buf, grad_out + local_ptr[idx] * d_model,
+                grad_middle + (offset + local_global_ptr[idx]) * d_hidden, grad_weight1, grad_weight2, grad_in + local_ptr[idx] * d_model,
                 has_bias,
                 i,
                 0, local_expert_count[idx],
