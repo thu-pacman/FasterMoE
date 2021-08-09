@@ -30,6 +30,62 @@ class _Expert(nn.Module):
         return x
 
 
+def _gen_policy(alpha):
+    def _global_policy(all_experts_count, all_global_expert_count, num_expert, world_size, d_model, fused):
+        bw_pcie = 88 * 1e9 / 8
+        bw_net = 50 * 1e9 / 8
+        bw_mm = 11.5e12
+        data_size = 4 # TODO data different than float
+
+        if fused:
+            all_experts_count = all_experts_count.sum(dim=-1).view(world_size, world_size, 1)
+            all_global_expert_count = all_global_expert_count.sum(dim=-1).view(world_size, world_size, 1)
+
+        fwd_expert_counts = all_global_expert_count.sum(1) # [world_size, num_expert]
+        default_counts = fwd_expert_counts.clone()
+
+        _, indices = fwd_expert_counts.sort(0, descending=True)
+
+        alphaHsquared = alpha * d_model ** 2 * data_size
+
+        B_w = default_counts.max(0)[0]
+        lat_comp = 3 * 4 * B_w * alphaHsquared / bw_mm  + 4 * B_w * d_model * data_size / bw_net
+
+        comm = float('+inf')
+        model_size = 2 * alphaHsquared * num_expert / bw_net * (1 + 2 * (world_size - 1) / world_size)
+        comp_time = 12 * alphaHsquared / bw_mm
+
+        for i, index in enumerate(indices):
+            fwd_expert_counts[index] = 0
+            fwd_expert_counts += all_global_expert_count[index].view(world_size, -1)
+
+            B_k = fwd_expert_counts.max(0)[0]
+            lat_comm = fwd_expert_counts.max(0)[0] * comp_time + (i+1) * model_size
+
+            if lat_comm < comm:
+                comm = lat_comm
+            elif lat_comm > comm:
+                break
+
+        res = all_experts_count.new_zeros(world_size, num_expert, dtype=bool)
+
+        if lat_comp > comm:
+            res[indices[:i]] = True
+        return res
+
+    def _no_policy(all_experts_count, all_global_expert_count, num_expert, world_size, d_model, fused):
+        if fused:
+            all_experts_count = all_experts_count.sum(dim=-1).view(world_size, world_size, 1)
+        res = all_experts_count.new_zeros(world_size, num_expert, dtype=bool)
+        return res
+
+    import os
+    if os.environ.get('FMOE_ENABLE_DYNREP', '0') == '1':
+        return _global_policy
+    else:
+        return _no_policy
+
+
 class FMoETransformerMLP(FMoE):
     r"""
     A complete MoE MLP module in a Transformer block.
@@ -64,6 +120,7 @@ class FMoETransformerMLP(FMoE):
             moe_group=moe_group,
             gate_hook=gate_hook,
             mask=mask,
+            policy_fn=_gen_policy(d_hidden / d_model),
             mask_dict=mask_dict
         )
         self.experts = _Expert(

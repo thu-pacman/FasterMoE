@@ -148,50 +148,6 @@ def _fmoe_general_global_forward(
     )
     return x
 
-def _default_policy(all_experts_count, all_global_expert_count, num_expert, world_size, d_model, fused):
-    bw_pcie = 88 * 1e9 / 8                     
-    bw_net = 50 * 1e9 / 8                                      
-    bw_mm = 11.5e12
-    data_size = 4 # TODO data different than float
-    alpha = 2 # TODO alpha can be different
-    
-    if fused:
-        all_experts_count = all_experts_count.sum(dim=-1).view(world_size, world_size, 1)
-        all_global_expert_count = all_global_expert_count.sum(dim=-1).view(world_size, world_size, 1)
-
-    fwd_expert_counts = all_global_expert_count.sum(1) # [world_size, num_expert]
-    default_counts = fwd_expert_counts.clone()
-    
-    _, indices = fwd_expert_counts.sort(0, descending=True)
-    
-    alphaHsquared = alpha * d_model ** 2 * data_size**2
-    
-    B_w = default_counts.max(0)[0]
-    lat_comp = 3 * 4 * B_w * alphaHsquared / bw_mm  + 4 * B_w * d_model * data_size / bw_net
-    
-    comm = float('+inf')
-    model_size = 2 * alphaHsquared * num_expert / bw_net * (1 + 2 * (world_size - 1) / world_size)
-    comp_time = 12 * alphaHsquared / bw_mm
-    
-    for i, index in enumerate(indices):
-        fwd_expert_counts[index] = 0
-        fwd_expert_counts += all_global_expert_count[index].view(world_size, -1)
-        
-        B_k = fwd_expert_counts.max(0)[0]
-        lat_comm = fwd_expert_counts.max(0)[0] * comp_time + (i+1) * model_size
-        
-        if lat_comm < comm:
-            comm = lat_comm
-        elif lat_comm > comm:
-            break
-    
-    res = all_experts_count.new_zeros(world_size, num_expert, dtype=bool)
-
-    if lat_comp > comm:
-        res[indices[:i]] = True
-    
-    return res
-
 class FMoE(nn.Module):
     r"""
     A general moe implementation that supports an arbitrary module as the
@@ -221,7 +177,7 @@ class FMoE(nn.Module):
         gate=NaiveGate,
         expert=None,
         gate_hook=None,
-        policy_fn=_default_policy,
+        policy_fn=None,
         mask=None,
         mask_dict=None,
         enable_fuse=False

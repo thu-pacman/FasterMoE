@@ -307,7 +307,7 @@ void fmoe_cuda_fused_forward_impl(
         cudaEventRecord(input_ready[step], smgr->stream(0));
     }
 
-    int last = params[rank][0].size() - 1; // bias = False
+    int last = params[rank][0].size() / 2; // bias = False
     scalar_t * weight1 = params[rank][0][0].data_ptr<scalar_t>();
     scalar_t * weight2 = params[rank][0][last].data_ptr<scalar_t>();
 
