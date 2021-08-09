@@ -78,32 +78,39 @@ void fmoe_cuda_global_scatter_impl(
     int rank;
     NCCL_SAFE_CALL(ncclCommUserRank(smgr->ncclcomm, &rank));
 
+    // Locally move the data to its correct place before any data is received/sent mantaining the tokens contiguous
+    for (size_t j = 0; j < rank; j++) {
+        for (size_t i = 0; i < n_expert; i++) {
+            int idx = i + j * n_expert;
+            if (stored_models[idx]) {
+                checkCudaErrors(cudaMemcpyAsync(
+                    input_buf + recv_ptr * in_feat,
+                    local_input_buf + expert_ptr[idx] * in_feat,
+                    local_expert_count[idx] * in_feat * sizeof(scalar_t),
+                    cudaMemcpyDeviceToDevice,
+                    smgr->stream(1)));
+                recv_ptr += local_expert_count[idx];
+            }
+        }
+    }
+
+    // Receive data from other nodes
     for (size_t i = 0; i < n_expert; ++i) {
         NCCL_SAFE_CALL(ncclGroupStart());
         for (size_t j = 0; j < world_size; ++j) {
             int idx = i + j * n_expert;
-            if (local_expert_count[idx]) {
+            if (local_expert_count[idx] && (!stored_models[idx] || j == rank)) {
                 // model fetched from other node
-                if (stored_models[idx]) {
-                    checkCudaErrors(cudaMemcpyAsync(
-                        input_buf + recv_ptr * in_feat,
-                        local_input_buf + expert_ptr[idx] * in_feat,
-                        local_expert_count[idx] * in_feat * sizeof(scalar_t),
-                        cudaMemcpyDeviceToDevice,
-                        smgr->stream(1)));
-                    recv_ptr += local_expert_count[idx];
-                } else {
-                    NCCL_SAFE_CALL(ncclSend(
-                        local_input_buf + expert_ptr[idx] * in_feat, 
-                        local_expert_count[idx] * in_feat * sizeof(scalar_t),
-                        ncclChar, 
-                        j,
-                        smgr->ncclcomm,
-                        smgr->stream(0)));
-                }
+                NCCL_SAFE_CALL(ncclSend(
+                    local_input_buf + expert_ptr[idx] * in_feat, 
+                    local_expert_count[idx] * in_feat * sizeof(scalar_t),
+                    ncclChar, 
+                    j,
+                    smgr->ncclcomm,
+                    smgr->stream(0)));
             }
-            if (global_expert_count[idx] && !stored_models[rank * n_expert + i]) {
-                NCCL_SAFE_CALL(ncclRecv(
+            if (global_expert_count[idx] && (!stored_models[rank * n_expert + i] || j == rank)) {
+                    NCCL_SAFE_CALL(ncclRecv(
                         input_buf + recv_ptr * in_feat,
                         global_expert_count[idx] * in_feat * sizeof(scalar_t),
                         ncclChar,
@@ -115,6 +122,23 @@ void fmoe_cuda_global_scatter_impl(
         }
         NCCL_SAFE_CALL(ncclGroupEnd());
     }
+
+    // Handle the data of experts after this node
+    for (size_t j = rank + 1; j < world_size; j++) {
+        for (size_t i = 0; i < n_expert; i++) {
+            int idx = i + j * n_expert;
+            if (stored_models[idx]) {
+                checkCudaErrors(cudaMemcpyAsync(
+                    input_buf + recv_ptr * in_feat,
+                    local_input_buf + expert_ptr[idx] * in_feat,
+                    local_expert_count[idx] * in_feat * sizeof(scalar_t),
+                    cudaMemcpyDeviceToDevice,
+                    smgr->stream(1)));
+                recv_ptr += local_expert_count[idx];
+            }
+        }
+    }
+
     delete [] expert_ptr;
     smgr->sync(2);
 }
@@ -139,32 +163,39 @@ void fmoe_cuda_global_gather_impl(
 
     int rank;
     NCCL_SAFE_CALL(ncclCommUserRank(smgr->ncclcomm, &rank));
+    
+    // Locally move the data to its correct place before any data is received/sent mantaining the tokens contiguous
+    for (size_t j = 0; j < rank; j++) {
+        for (size_t i = 0; i < n_expert; i++) {
+            int idx = i + j * n_expert;
+            if (stored_models[idx]) {
+                checkCudaErrors(cudaMemcpyAsync(
+                    local_output_buf + expert_ptr[idx] * out_feat,
+                    output_buf + send_ptr * out_feat,
+                    local_expert_count[idx] * out_feat * sizeof(scalar_t),
+                    cudaMemcpyDeviceToDevice,
+                    smgr->stream(1)));
+                send_ptr += local_expert_count[idx];
+            } 
+        }
+    }
+
 
     for (size_t i = 0; i < n_expert; ++i) {
         NCCL_SAFE_CALL(ncclGroupStart());
         for (size_t j = 0; j < world_size; ++j) {
             int idx = i + j * n_expert;
-            if (local_expert_count[idx]) {
-                if (stored_models[idx]) {
-                    checkCudaErrors(cudaMemcpyAsync(
-                        local_output_buf + expert_ptr[idx] * out_feat,
-                        output_buf + send_ptr * out_feat,
-                        local_expert_count[idx] * out_feat * sizeof(scalar_t),
-                        cudaMemcpyDeviceToDevice,
-                        smgr->stream(1)));
-                    send_ptr += local_expert_count[idx];
-                } else{
-                    NCCL_SAFE_CALL(ncclRecv(
-                        local_output_buf + expert_ptr[idx] * out_feat, 
-                        local_expert_count[idx] * out_feat * sizeof(scalar_t),
-                        ncclChar, 
-                        j,
-                        smgr->ncclcomm,
-                        smgr->stream(0)));
-                }
+            if (local_expert_count[idx] && (!stored_models[idx] || j == rank)) {
+                NCCL_SAFE_CALL(ncclRecv(
+                    local_output_buf + expert_ptr[idx] * out_feat, 
+                    local_expert_count[idx] * out_feat * sizeof(scalar_t),
+                    ncclChar, 
+                    j,
+                    smgr->ncclcomm,
+                    smgr->stream(0)));
             }
 
-            if (global_expert_count[idx] && !stored_models[rank * n_expert + i]) {
+            if (global_expert_count[idx] && (!stored_models[rank * n_expert + i] || j == rank)) {
                 NCCL_SAFE_CALL(ncclSend(
                     output_buf + send_ptr * out_feat,
                     global_expert_count[idx] * out_feat * sizeof(scalar_t),
@@ -177,6 +208,23 @@ void fmoe_cuda_global_gather_impl(
         }
         NCCL_SAFE_CALL(ncclGroupEnd());
     }
+
+    // Handle the data of experts after this node
+    for (size_t j = rank + 1; j < world_size; j++) {
+        for (size_t i = 0; i < n_expert; i++) {
+            int idx = i + j * n_expert;
+            if (stored_models[idx]) {
+                checkCudaErrors(cudaMemcpyAsync(
+                    local_output_buf + expert_ptr[idx] * out_feat,
+                    output_buf + send_ptr * out_feat,
+                    local_expert_count[idx] * out_feat * sizeof(scalar_t),
+                    cudaMemcpyDeviceToDevice,
+                    smgr->stream(1)));
+                send_ptr += local_expert_count[idx];
+            }
+        }
+    }
+
     delete [] expert_ptr;
     smgr->sync(2);
 }
@@ -231,7 +279,6 @@ void fmoe_cuda_model_exchange_impl(
     }
 
     smgr->sync(1);
-    // printf("Model exchange: Sent %ld Received %ld\n", amount_sent, amount_received);
 }
 
 
@@ -291,7 +338,6 @@ void fmoe_cuda_gradient_exchange_impl(
                 scalar_t * param = j == rank ? local_grads[i].data_ptr<scalar_t>() : grads[j][i].data_ptr<scalar_t>();
 
                 auto size = local_grads[i].numel();
-                
                 exchange_reduce(param, size, j, smgr);
             }
         }
