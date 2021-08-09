@@ -152,6 +152,8 @@ def _default_policy(all_experts_count, all_global_expert_count, num_expert, worl
     bw_pcie = 88 * 1e9 / 8                     
     bw_net = 50 * 1e9 / 8                                      
     bw_mm = 11.5e12
+    data_size = 4 # TODO data different than float
+    alpha = 2 # TODO alpha can be different
     
     if fused:
         all_experts_count = all_experts_count.sum(dim=-1).view(world_size, world_size, 1)
@@ -162,10 +164,10 @@ def _default_policy(all_experts_count, all_global_expert_count, num_expert, worl
     
     _, indices = fwd_expert_counts.sort(0, descending=True)
     
-    alphaHsquared = d_model * (d_model**2) * 4**2
+    alphaHsquared = alpha * d_model ** 2 * data_size**2
     
     B_w = default_counts.max(0)[0]
-    lat_comp = 12 * B_w * alphaHsquared / bw_mm  + 4 * B_w * d_model * 4 / bw_net
+    lat_comp = 3 * 4 * B_w * alphaHsquared / bw_mm  + 4 * B_w * d_model * data_size / bw_net
     
     comm = float('+inf')
     model_size = 2 * alphaHsquared * num_expert / bw_net * (1 + 2 * (world_size - 1) / world_size)
