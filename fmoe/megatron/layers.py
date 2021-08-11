@@ -70,6 +70,39 @@ def _random_init_weight(self, rng):
         self.bias.data = torch.from_numpy(bias).to(dtype=dtype, device=device)
 
 
+class BaseMLP(nn.Module):
+    def __init__(self, args):
+        super().__init__()
+        sigma = args.init_method_std
+
+        from fairseq.modules import BaseLayer
+        from fmoe.layers import mark_module_parallel_comm
+        args.decoder_embed_dim = args.hidden_size
+        args.decoder_ffn_embed_dim = args.hidden_hidden_size
+        args.base_shuffle = True
+        args.base_sublayers = 1
+        self.top_k = args.top_k
+        self.models = nn.ModuleList()
+        for i in range(args.top_k):
+            model = BaseLayer(args)
+            model.expert_centroids.dp_comm = 'dp'
+            mark_module_parallel_comm(model, 'moe')
+
+            rng = np.random.default_rng(np.random.randint(2048) + args.rank * 100000 + i)
+            _megatron_init_method(model.expert_network[0].ff1, rng, sigma)
+            std = sigma / math.sqrt(2.0 * args.num_layers)
+            _megatron_init_method(model.expert_network[0].ff2, rng, std)
+            self.models.append(model)
+
+    def forward(self, inp):
+        outs = [self.models[i](inp)[0] for i in range(self.top_k)]
+        out = sum(outs) / self.top_k
+        return (
+            out,
+            torch.zeros(inp.shape[-1], dtype=inp.dtype, device=inp.device),
+        )
+
+
 class MegatronMLP(FMoETransformerMLP):
     r"""
     Make the FMoETransformerMLP layer that distributes experts across
@@ -101,6 +134,9 @@ class MegatronMLP(FMoETransformerMLP):
         elif args.balance_strategy == "neighbor":
             from fmoe.gates.neighbor_gate import gen_neighbor_gate
             gate = gen_neighbor_gate(moe_group.rank())
+        elif args.balance_strategy == "baselayer":
+            from fmoe.gates.base_layer_gate import BaseLayerGate
+            gate = BaseLayerGate
         elif args.balance_strategy == "hir":
             from fmoe.gates.hir_gate import gen_hir_gate
             gate = gen_hir_gate(moe_group.rank())
@@ -210,7 +246,10 @@ def fmoefy(
                 moe_group = group
         set_moe_group(moe_group)
     for idx, l in enumerate(model.language_model.transformer.layers):
-        l.mlp = MegatronMLP(args, mp_group, moe_group, idx)
+        if args.balance_strategy == 'baseorig':
+            l.mlp = BaseMLP(args)
+        else:
+            l.mlp = MegatronMLP(args, mp_group, moe_group, idx)
 
     # initialize gate hook
     num_layers = len(model.language_model.transformer.layers)
