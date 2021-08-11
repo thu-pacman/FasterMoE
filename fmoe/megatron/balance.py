@@ -74,7 +74,7 @@ def add_balance_log(model, writer, iteration):
 
 
 noloss_strategies = set([
-    'naive', 'neighbor', 'hir'
+    'naive', 'neighbor', 'hir', 'baselayer', 'baseorig'
 ])
 
 
@@ -96,29 +96,32 @@ def patch_forward_step(forward_step_func):
         else:
             output = forward_step_func(data_iterator, model, input_tensor)
 
-        if not is_pipeline_last_stage() or not args.balance_strategy or args.balance_strategy in noloss_strategies:
-            return output
-        loss_name = args.balance_strategy + "_loss"
+        if args.balance_strategy == 'baseorig':
+            loss, state_dict = output
+        else:
+            if not is_pipeline_last_stage() or not args.balance_strategy or args.balance_strategy in noloss_strategies:
+                return output
+            loss_name = args.balance_strategy + "_loss"
 
-        while hasattr(model, 'module'):
-            model = model.module
+            while hasattr(model, 'module'):
+                model = model.module
 
-        loss_list = [l.mlp.gate.get_loss(clear=False).view(1)
-                for l in model.language_model.transformer.layers]
-        (loss, state_dict), bal_loss = (
-            output,
-            torch.cat(loss_list).mean() * args.balance_loss_weight
-        )
+            loss_list = [l.mlp.gate.get_loss(clear=False).view(1)
+                    for l in model.language_model.transformer.layers]
+            (loss, state_dict), bal_loss = (
+                output,
+                torch.cat(loss_list).mean() * args.balance_loss_weight
+            )
 
-        # avarage across moe group
-        moe_group = get_moe_group()
-        world_size = torch.distributed.get_world_size(group=moe_group)
-        averaged_bal_loss = bal_loss.clone().detach()
-        torch.distributed.all_reduce(averaged_bal_loss, group=moe_group)
-        averaged_bal_loss /= world_size
+            # avarage across moe group
+            moe_group = get_moe_group()
+            world_size = torch.distributed.get_world_size(group=moe_group)
+            averaged_bal_loss = bal_loss.clone().detach()
+            torch.distributed.all_reduce(averaged_bal_loss, group=moe_group)
+            averaged_bal_loss /= world_size
 
-        loss += bal_loss
-        state_dict[loss_name] = averaged_bal_loss
+            loss += bal_loss
+            state_dict[loss_name] = averaged_bal_loss
 
         return loss, state_dict
 
