@@ -40,6 +40,7 @@ if __name__ == '__main__':
                     'cuda/fused_compute.cu',
                     'cuda/global_exchange.cu',
                     'cuda/parallel_linear.cu',
+                    'cuda/balanced_assignment.cpp',
                     'cuda/fmoe_cuda.cpp',
                     ],
                 extra_compile_args={

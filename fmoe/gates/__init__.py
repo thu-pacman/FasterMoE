@@ -7,3 +7,4 @@ from .noisy_gate import NoisyGate
 
 from .gshard_gate import GShardGate
 from .switch_gate import SwitchGate
+from .base_layer_gate import BaseLayerGate

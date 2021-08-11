@@ -8,7 +8,7 @@ import math
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
-from fmoe.gates import GShardGate, SwitchGate
+from fmoe.gates import GShardGate, SwitchGate, BaseLayerGate
 from test_ddp import _run_distributed
 
 
@@ -47,6 +47,7 @@ def _test_gshard_gate(d_model, batch_size, n_expert, cap):
             capacity=(cap, cap)).cuda()
     x = torch.rand(batch_size, d_model).cuda()
     topk_idx, topk_val = gate(x)
+    print(topk_idx.shape, topk_val.shape)
     counts = [0 for _ in range(n_expert * dist.get_world_size())]
     for v in topk_idx.cpu().view(-1).numpy():
         if v != -1:
@@ -114,12 +115,36 @@ def _test_switch_gate(d_model, batch_size, n_expert, cap):
             assert topk_val[i] == score[i, topk_idx[i]]
 
 
+@pytest.mark.parametrize("d_model", [32])
+@pytest.mark.parametrize("batch_size", [16, 4096])
+@pytest.mark.parametrize("n_expert", [1, 16])
+def test_base_layer_gate(d_model, batch_size, n_expert):
+    _run_distributed('_test_base_layer_gate',
+            1,
+            {
+                'd_model': d_model,
+                'batch_size': batch_size,
+                'n_expert': n_expert
+            },
+            script=__file__
+    )
+
+
+def _test_base_layer_gate(d_model, batch_size, n_expert):
+    _ensure_initialized()
+    gate = BaseLayerGate(d_model, n_expert, dist.get_world_size()).cuda()
+    x = torch.rand(batch_size, d_model).cuda()
+    x.requires_grad = True
+    top_idx, top_val = gate(x)
+    print(top_idx, top_val)
+
+
 if __name__ == '__main__':
     if len(sys.argv) >= 3:
         args = json.loads(sys.argv[2])
         locals()[sys.argv[1]](**args)
     else:
         _ensure_initialized()
-        # test_gshard_gate(4096, 1024, 4, .2)
-        test_switch_gate(8, 16, 4, .1)
+        test_base_layer_gate(32, 16, 8)
+        # test_switch_gate(8, 16, 4, .1)
         # test_switch_gate(4096, 1024, 4, .2)
