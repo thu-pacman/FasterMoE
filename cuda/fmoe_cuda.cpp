@@ -53,6 +53,9 @@ torch::Tensor _prune_gate_by_capacity(
         torch::Tensor gate_idx, torch::Tensor expert_count,
         long n_expert, long n_worker);
 
+// base_layer
+torch::Tensor _balanced_assignment(torch::Tensor job_and_worker_to_score);
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 #ifdef FMOE_USE_NCCL
     m.def("expert_exchange", &_expert_exchange, "FastMoE expert exchange (CUDA)");
@@ -69,4 +72,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
     m.def("limit_by_capacity", &_limit_by_capacity, "FastMoE limit experts by capacity(CUDA)");
     m.def("prune_gate_by_capacity", &_prune_gate_by_capacity, "FastMoE prune gate by capacity(CUDA)");
+    
+    m.def("balanced_assignment", &_balanced_assignment, "Balanced Assignment");
 }

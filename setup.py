@@ -39,6 +39,7 @@ if __name__ == '__main__':
                     'cuda/balancing.cu',
                     'cuda/global_exchange.cpp',
                     'cuda/parallel_linear.cu',
+                    'cuda/balanced_assignment.cpp',
                     'cuda/fmoe_cuda.cpp',
                     ],
                 extra_compile_args={
