@@ -130,7 +130,7 @@ def _fmoe_general_global_forward(
                 local_expert_count, global_expert_count,
                 stored_models,
                 fwd_expert_count.sum().item(), out_batch_size, world_size)
-        return x
+        return x, stored_models
 
     x = MOEScatter.apply(
         inp, pos // topk,
@@ -146,7 +146,7 @@ def _fmoe_general_global_forward(
         stored_models,
         out_batch_size, world_size
     )
-    return x
+    return x, stored_models
 
 class FMoE(nn.Module):
     r"""
@@ -205,6 +205,8 @@ class FMoE(nn.Module):
         else:
             self.experts_fused = True
         self.gate = gate(d_model, num_expert, world_size, top_k)
+        if hasattr(self.gate, 'stored_models'):
+            self.gate.policy_fn = policy_fn
         self.gate_hook = gate_hook
         self.mask = mask
         self.mask_dict = mask_dict
@@ -291,7 +293,7 @@ class FMoE(nn.Module):
             gate_top_k_idx = gate_top_k_idx[mask == 0, :]
 
 
-        fwd = _fmoe_general_global_forward(
+        fwd, stored_models = _fmoe_general_global_forward(
             inp, gate_top_k_idx,
             self.expert_fn, 
             self.policy_fn, 
@@ -301,6 +303,7 @@ class FMoE(nn.Module):
             self.experts_fused,
             self.enable_fuse
         )
+
 
         # recover deleted tensors
         if self.mask is not None and self.mask_dict is not None:

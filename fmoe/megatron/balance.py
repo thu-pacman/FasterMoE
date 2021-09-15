@@ -74,7 +74,7 @@ def add_balance_log(model, writer, iteration):
 
 
 noloss_strategies = set([
-    'naive', 'neighbor', 'hir', 'baselayer', 'baseorig'
+    'naive', 'neighbor', 'baselayer', 'baseorig'
 ])
 
 

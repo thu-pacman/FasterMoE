@@ -52,7 +52,7 @@ def _gen_policy(alpha):
         lat_comp = 3 * 4 * B_w * alphaHsquared / bw_mm  + 4 * B_w * d_model * data_size / bw_net
 
         comm = float('+inf')
-        model_size = 2 * alphaHsquared * num_expert / bw_net * (1 + 2 * (world_size - 1) / world_size)
+        model_size = 2 * alphaHsquared * num_expert / bw_net * 2
         comp_time = 12 * alphaHsquared / bw_mm
 
         for i, index in enumerate(indices):

@@ -11,40 +11,53 @@ import numpy as np
 
 class BaseLayerGate(nn.Module):
 
-    def __init__(self, d_model, num_expert, world_size, base_shuffle=True):
+    def __init__(self, d_model, num_expert, world_size, topk=2, base_shuffle=True):
         super().__init__()
+        self.topk = topk
         self.world_size = world_size
-        self.num_workers = num_expert
-        self.num_expert = num_expert
-        expert_centroids = torch.empty(self.num_workers, d_model).cuda()
-        torch.nn.init.orthogonal_(expert_centroids, gain=0.1)
-        self.register_parameter("expert_centroids", torch.nn.Parameter(expert_centroids))
+        self.num_workers = world_size * num_expert
+        self.num_expert = world_size * num_expert
+        self.expert_centroids = []
+        for i in range(topk):
+            c = torch.empty(self.num_workers, d_model).cuda()
+            torch.nn.init.orthogonal_(c, gain=0.1)
+            self.register_parameter("expert_centroids_{}".format(i),
+                    torch.nn.Parameter(c))
+            self.expert_centroids.append(c)
         self.shuffle = base_shuffle
 
     def forward(self, input_features):
         features = input_features.reshape(-1, input_features.size(-1))
         is_training = input_features.requires_grad
 
-        if self.shuffle and is_training:
-            # Send each token to a random worker, to break correlations within the batch
-            shuffle_sort = torch.randperm(features.size(0), device=features.device)
-            features = All2All.apply(features[shuffle_sort])
+        # if self.shuffle and is_training:
+        #     # Send each token to a random worker, to break correlations within the batch
+        #     shuffle_sort = torch.randperm(features.size(0), device=features.device)
+        #     features = All2All.apply(features[shuffle_sort])
 
-        with torch.no_grad():
-            # Compute similarity of each token to each expert, for routing
-            token_expert_affinities = features.matmul(self.expert_centroids.transpose(0, 1))
+        tis, tvs = [], []
+        for i in range(self.topk):
+            print(i)
+            with torch.no_grad():
+                # Compute similarity of each token to each expert, for routing
+                token_expert_affinities = features.matmul(self.expert_centroids[i].transpose(0, 1))
+            print(token_expert_affinities)
 
-        # Compute which token goes to which expert
-        top_idx = self.balanced_assignment(token_expert_affinities)
-        top_idx = np.delete(top_idx.cpu(), -1, axis=1).cuda()
+            # Compute which token goes to which expert
+            top_idx = self.balanced_assignment(token_expert_affinities)
+            top_idx = np.delete(top_idx.cpu(), -1, axis=1).cuda()
 
-        # Swap these tokens for the right ones for our expert
-        top_value = torch.empty(top_idx.size())
-        for i in range(0, self.num_expert):
-            for j in range(0, int(int(features.size(0)) / self.num_expert)):
-                top_value[i][j] = token_expert_affinities[top_idx[i][j]][i]
+            print(top_idx)
 
-        return top_idx, top_value
+            # Swap these tokens for the right ones for our expert
+            top_value = torch.empty(top_idx.size())
+            for i in range(0, self.num_expert):
+                for j in range(0, int(int(features.size(0)) / self.num_expert)):
+                    top_value[i][j] = token_expert_affinities[top_idx[i][j]][i]
+            tis.append(top_idx)
+            tvs.append(top_value)
+
+        return tis, tvs
 
     def balanced_assignment(self, scores):
         ok = scores.isfinite()
